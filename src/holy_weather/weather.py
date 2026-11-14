@@ -156,6 +156,12 @@ def context(state, event_ms, start_ms):
 
 class WeatherPoller:
     """One bounded HTTP worker, no SQLite access, no service or retry loop."""
+    source=SOURCE
+    interval=POLL_SECONDS
+    record_method='record_weather'
+    status_method='weather_status'
+    failed_states=('INVALID_DATA','WEATHER_STATE_BOUND')
+
     def __init__(self, fetcher=fetch_weather, monotonic=time.monotonic):
         self.fetcher=fetcher; self.clock=monotonic; self.next_at=0; self.thread=None
         self.queue=queue.Queue(maxsize=1); self.stopped=False
@@ -166,16 +172,16 @@ class WeatherPoller:
         except queue.Empty:
             receipt=None
         if receipt is not None:
-            store.record_weather(receipt, market, millis())
-            self.stopped=bool(receipt.get('terminal')) or store.weather_status() in ('INVALID_DATA','WEATHER_STATE_BOUND')
+            getattr(store,self.record_method)(receipt, market, millis())
+            self.stopped=bool(receipt.get('terminal')) or getattr(store,self.status_method)() in self.failed_states
         if not self.stopped and self.clock()>=self.next_at and (self.thread is None or not self.thread.is_alive()) and self.queue.empty():
-            self.next_at=self.clock()+POLL_SECONDS
+            self.next_at=self.clock()+self.interval
             def request():
                 try:result=self.fetcher()
                 except Exception as exc:
-                    result=dict(source=SOURCE,requested_ms=at,received_ms=millis(),status='WORKER_ERROR',error=type(exc).__name__,terminal=True)
+                    result=dict(source=self.source,requested_ms=at,received_ms=millis(),status='WORKER_ERROR',error=type(exc).__name__,terminal=True)
                 self.queue.put_nowait(result)
-            self.thread=threading.Thread(target=request,daemon=True,name='awc-one-request');self.thread.start()
+            self.thread=threading.Thread(target=request,daemon=True,name=self.status_method+'-one-request');self.thread.start()
 
     def close(self):
         self.stopped=True  # worker has a bounded socket timeout and never writes

@@ -84,8 +84,9 @@ Mac, shared database, server transport, secret or production component is a
 runtime dependency. See [docs/QUALIFICATION.md](docs/QUALIFICATION.md).
 
 Stage 2 optionally adds observed KLGA weather context as described below.
-Forecasts, Telegram, production installation and a 48-hour supervisor remain
-outside the implementation. Price alerts
+Stage 3 optionally adds original hourly LAMP context as described below.
+Own forecast models, Telegram, production installation and a 48-hour supervisor
+remain outside the implementation. Price alerts
 establish neither warming accuracy nor trading advantage. No orders are placed.
 
 
@@ -134,3 +135,46 @@ Their outer `received_at` is main-loop availability; the nested `receipt` retain
 actual HTTP requested/received times, exact body, SHA and source. Envelopes remain
 chronological and cannot precede Gamma. Weather is never retroactively fetched
 for a historical market event. See [stage 2 qualification](docs/STAGE2_QUALIFICATION.md).
+
+
+## Stage 3: original LAMP and remaining-day temperature context
+
+```sh
+.venv/bin/holy-weather observe --config config.lamp.example.toml
+```
+
+LAMP requires the stage-2 weather context. Only the official KLGA station bulletin
+is requested, at most once per 15 minutes, in a separate bounded worker. LAMP
+failure cannot block AWC or price processing. The NOAA web display is experimental,
+not an operational availability guarantee. No alternate URL/identity is tried
+on a denied response. Source HTML, SHA, nominal issue time from its header,
+HTTP receipt and main-loop availability are retained in the same SQLite.
+
+TMP uses native Fahrenheit and fixed-width three-character columns (including
+negative/three-digit values and 999 missing). UTC columns are validated against
+the issue date, then converted using America/New_York. Context uses only future
+hourly points on the contract's local date. Past hours and the next local day
+cannot set the remaining-day peak. DST folds retain both distinct UTC hours.
+
+The structured preview is in `storage.forecast_card`; committed price events
+freeze `lamp` and `prices` alongside weather. It keeps METAR temperature,
+received-observation maximum and original future LAMP peak separate. The signed
+peak-minus-observed-maximum difference is never clamped to zero or used to replace
+the forecast. An hourly peak is not an official daily Tmax or an interval maximum.
+For a verified 46–47°F bucket with nearest-whole half-up rules, the raw-temperature
+interval is [45.5,47.5)°F. Distances are labelled in Fahrenheit.
+
+Missing TMP, partial remaining TMP, no remaining hours, future clocks, unavailable
+or stale bulletins produce explicit statuses and no usable peak. LAMP older than
+two hours by its nominal issue clock is stale (context policy; price freshness
+stays at 90 seconds). Re-fetching an identical bulletin does not reset its issue
+or original availability time. Later bulletins do not modify committed events.
+The cutoff is local market receipt time, not a claim about other traders' knowledge.
+
+No schema migration, service, database or dependency is added. A 64-KiB HTTP bound,
+25/38 hourly columns, one LAMP worker/result and a subordinate 1-MiB compressed
+LAMP journal ceiling fit within the unchanged 256-MiB directory budget. Explicit
+retention preserves referenced forecast evidence. Source rollback to stage 2 uses
+its weather-only config (omit `lamp_context`); the database is not restored from
+an old snapshot. Replay supports causal `kind: lamp` envelopes with immutable
+receipts. See [stage 3 qualification](docs/STAGE3_QUALIFICATION.md).

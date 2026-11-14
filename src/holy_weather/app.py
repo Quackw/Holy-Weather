@@ -78,13 +78,13 @@ def process(raw, received_ms, market, store, counters):
                 raise ValueError('INVALID_INPUT_BUDGET_EXHAUSTED')
 
 
-def observe(cfg, *, connect=None, stop=None, weather_fetch=None):
+def observe(cfg, *, connect=None, stop=None, weather_fetch=None, lamp_fetch=None):
     if connect is None:
         from websockets.sync.client import connect
     from websockets.exceptions import ConnectionClosed, InvalidStatus, WebSocketException
     stop = stop or threading.Event(); counters=Counter(); reason='COMPLETED_WINDOW'; exit_code=0
     deadline=time.monotonic()+cfg.duration_seconds
-    weather=None
+    weather=None;lamp=None
     with Store(cfg) as store:
         logger=logging.getLogger('holy_weather');logger.setLevel(logging.INFO);logger.propagate=False
         handler=RotatingFileHandler(store.root/'monitor.log',maxBytes=524288,backupCount=2)
@@ -95,6 +95,9 @@ def observe(cfg, *, connect=None, stop=None, weather_fetch=None):
                 from .weather import WeatherPoller, fetch_weather, station_check
                 station_check(market)
                 weather=WeatherPoller(weather_fetch or fetch_weather)
+            if cfg.lamp_context:
+                from .lamp import LampPoller,fetch_lamp
+                lamp=LampPoller(lamp_fetch or fetch_lamp)
             initial_bytes=store.usage();initial_writes=disk_write_bytes();started=time.monotonic();attempt=0
             while not stop.is_set() and time.monotonic()<deadline:
                 try:
@@ -107,6 +110,7 @@ def observe(cfg, *, connect=None, stop=None, weather_fetch=None):
                             if datetime.now(timezone.utc).astimezone(ZoneInfo(market['timezone'])).date().isoformat()!=market['date']:
                                 reason='MARKET_LOCAL_DATE_ENDED';stop.set();break
                             if weather:weather.tick(store,market,millis())
+                            if lamp:lamp.tick(store,market,millis())
                             if time.monotonic()>=next_stats:
                                 health=store.observation_snapshot()['observation']['state']
                                 store.set_meta('counters',dict(counters));logger.info(json.dumps({'state':health,'counters':dict(counters)}));next_stats=time.monotonic()+10
@@ -150,7 +154,7 @@ def observe(cfg, *, connect=None, stop=None, weather_fetch=None):
             result={'state':reason,'exit_code':exit_code,'elapsed_seconds':elapsed,'market':{k:v for k,v in market.items() if k!='rules'},
                     'counters':dict(counters),'storage':store.stats(),'growth_since_discovery_bytes':max(0,store.usage()-initial_bytes),
                     'process_disk_write_bytes':written-initial_writes if written is not None and initial_writes is not None else None,
-                    'weather_context_enabled':cfg.weather_context, 'forecast_or_trading_implemented':False}
+                    'weather_context_enabled':cfg.weather_context, 'lamp_context_enabled':cfg.lamp_context, 'own_model_or_trading_implemented':False}
             result['data_state']=result['storage']['observation']['state']
             if result['storage']['sqlite_integrity']!='ok' or result['storage']['foreign_key_errors']:
                 result.update(state='STORAGE_INTEGRITY_FAILURE',exit_code=4)
@@ -160,6 +164,7 @@ def observe(cfg, *, connect=None, stop=None, weather_fetch=None):
             return {'state':'DISCOVERY_DENIED' if exc.code in (401,403,429) else 'DISCOVERY_HTTP_ERROR','http':exc.code,'exit_code':2,'storage':store.stats()}
         finally:
             if weather:weather.close()
+            if lamp:lamp.close()
             handler.close();logger.removeHandler(handler)
 
 

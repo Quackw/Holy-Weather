@@ -49,6 +49,8 @@ def replay(cfg, manifest_path):
             if e['kind']=='frame':process(json.dumps(e['data']),received,market,store,counters)
             elif e['kind']=='weather':
                 store.record_weather(e['receipt'],market,received)
+            elif e['kind']=='lamp':
+                store.record_lamp(e['receipt'],market,received)
             elif e['kind']=='control'and e.get('event')in ('gap','error','disconnect'):store.gap('REPLAY_'+e['event'],received)
         result={'state':'REPLAY_COMPLETE','mode':'SAVED_REAL_OR_SYNTHETIC_AS_DECLARED_BY_MANIFEST',
                 'manifest_sha256':sha(manifest_path.read_bytes()),'counters':dict(counters),'storage':store.stats(now_ms=int(previous.timestamp()*1000))}

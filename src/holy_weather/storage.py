@@ -193,11 +193,16 @@ class Store:
                 if self.cfg.weather_context:
                     from .weather import context
                     event['weather']=context(self.weather_state(),sample['received_ms'],min(p['received_ms'] for p in event['evidence']))
+                if self.cfg.lamp_context:
+                    from .lamp import context as lamp_context
+                    market=json.loads(self.c.execute('select payload from market where id=1').fetchone()[0])
+                    event['lamp']=lamp_context(self.lamp_state(),event['weather'],market,sample['received_ms'])
+                    event['prices']=self.price_context(sample['received_ms'])
                 ident = sha([sample['id'], self.cfg.rule_hash(), event['type'], event.get('level'), event.get('direction'), event['status']])
                 self.c.execute('insert into events values(?,?,?,?,?,?,?,?)', (ident, input_id, sample['token'], sample['received_ms'], event['type'], event['status'], event.get('reason'), canonical(event)))
                 for ref in {p['input_id'] for p in event['evidence']}:
                     self.c.execute('insert into event_inputs values(?,?)', (ident, ref))
-                for ref in event.get('weather',{}).get('input_ids',[]):
+                for ref in set(event.get('weather',{}).get('input_ids',[])) | set(event.get('lamp',{}).get('input_ids',[])):
                     self.c.execute('insert or ignore into event_inputs values(?,?)',(ident,ref))
                 discovery=self.c.execute("select input_id from latest where kind='discovery'").fetchone()
                 if discovery:self.c.execute('insert or ignore into event_inputs values(?,?)',(ident,discovery[0]))
@@ -209,6 +214,59 @@ class Store:
             elif status!='FRESH':
                 self.ready_tokens.discard(sample['token'])
         return result
+
+    def lamp_state(self):
+        row=self.c.execute("select value from meta where key='lamp_context_v1'").fetchone()
+        return json.loads(row[0]) if row else {}
+
+    def lamp_status(self):
+        return self.lamp_state().get('status','NOT_RECEIVED')
+
+    def record_lamp(self,receipt,market,available_ms):
+        from .lamp import update
+        if not self.cfg.lamp_context:raise ValueError('LAMP_NOT_ENABLED')
+        state=update(self.lamp_state(),receipt,market,available_ms)
+        raw=canonical(dict(receipt=receipt,available_ms=available_ms,status=state['status'],duplicate=state['duplicate'])).encode()
+        compressed=zlib.compress(raw,3)
+        with self.transaction():
+            used=self.c.execute("select coalesce(sum(length(raw)),0) from inputs where identity like 'LAMP:%'").fetchone()[0]
+            if used+len(compressed)>1024*1024:
+                self.c.execute("insert or replace into meta values('lamp_context_v1',?)",
+                               (canonical(dict(self.lamp_state(),status='LAMP_STATE_BOUND')),))
+                return
+            identity='LAMP:'+sha(raw)
+            self.c.execute('insert or ignore into inputs(identity,received_ms,raw,raw_sha) values(?,?,?,?)',
+                           (identity,receipt['received_ms'],compressed,sha(raw)))
+            ident=self.c.execute('select id from inputs where identity=?',(identity,)).fetchone()[0]
+            if not state['duplicate']:state['input_id']=ident
+            state['poll_input_id']=ident
+            self.c.execute("delete from latest where kind='lamp'")
+            for label,ref in (('__LAMP__',state['input_id']),('__LAMP_POLL__',ident)):
+                self.c.execute('insert into latest values(?,?,?)',(label,'lamp',ref))
+            self.c.execute("insert or replace into meta values('lamp_context_v1',?)",(canonical(state),))
+
+    def price_context(self,at_ms):
+        bound=self.c.execute('select payload from market where id=1').fetchone()
+        if not bound:return {}
+        market=json.loads(bound[0]);snapshot=self.observation_snapshot(now_ms=at_ms)
+        rows={r['token']:r for r in snapshot['latest'] if r['kind']!='last_trade_price'}
+        result={}
+        for side,token in market['tokens'].items():
+            r=rows.get(token)
+            if not r or r['received_ms']>at_ms:
+                result[side]={'ask':None,'status':'NOT_AVAILABLE'}
+            else:
+                result[side]={k:r[k]for k in ('input_id','bid','ask','source_ms','received_ms','freshness_now','status','quote_usable_now')}
+        return result
+
+    def forecast_card(self,at_ms):
+        from .weather import context as weather_context
+        from .lamp import context as lamp_context
+        bound=self.c.execute('select payload from market where id=1').fetchone()
+        if not bound:return {'status':'MARKET_NOT_BOUND'}
+        market=json.loads(bound[0]);weather=weather_context(self.weather_state(),at_ms,at_ms)
+        return dict(at_ms=at_ms,kind='INFORMATIONAL_CONTEXT_NOT_TRADE_SIGNAL',weather=weather,
+                    lamp=lamp_context(self.lamp_state(),weather,market,at_ms),prices=self.price_context(at_ms))
 
     def weather_state(self):
         row=self.c.execute("select value from meta where key='weather_context_v1'").fetchone()
@@ -276,6 +334,7 @@ class Store:
                 'compressed_input_bytes':self.c.execute('select coalesce(sum(length(raw)),0) from inputs').fetchone()[0]}
         result.update(self.observation_snapshot(now_ms=now_ms))
         if self.cfg.weather_context:result['weather_status']=self.weather_status()
+        if self.cfg.lamp_context:result['forecast_card']=self.forecast_card(now_ms)
         return result
 
     def observation_snapshot(self, *, now_ms=None):
