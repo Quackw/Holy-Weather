@@ -78,3 +78,44 @@ def test_stale_previous_and_partial_hours(cfg,market):
         assert not events(s)
         put(s,market,[999]*25,AT+7200002,issue=ISSUE+7200000)
         assert not events(s)
+
+def test_duplicate_receipt_advances_clock_guard(cfg,market):
+    with Store(enabled(cfg))as s:
+        s.bind(market,{});put(s,market,[46]*25,AT)
+        put(s,market,[46]*25,AT+1000)
+        with pytest.raises(ValueError,match='CLOCK_REVERSED'):
+            put(s,market,[48]*25,AT+500)
+        assert not events(s)
+
+def test_500_duplicates_bounded_extra_writes(cfg,market):
+    sizes=[];operations=[]
+    for on in (False,True):
+        local=replace(enabled(cfg),data_dir=cfg.data_dir+str(on),lamp_alert_enabled=on)
+        with Store(local,session=False)as s:
+            s.bind(market,{})
+            before=s.c.total_changes
+            for i in range(500):put(s,market,[46]*25,AT+i*1000)
+            operations.append(s.c.total_changes-before)
+            assert s.c.execute('select count(*) from inputs').fetchone()[0]==501
+            assert not events(s)
+            assert s.c.execute('pragma integrity_check').fetchone()[0]=='ok'
+            assert not s.c.execute('pragma foreign_key_check').fetchall()
+        from pathlib import Path
+        sizes.append((Path(local.data_dir)/'monitor.sqlite3').stat().st_size)
+    assert sizes[1]<=sizes[0]*1.1
+    assert operations[1]-operations[0]<=5
+
+def test_price_independence_late_forecast_and_event_immutability(cfg,market,make_raw):
+    from test_price_alert import send,alerts
+    from holy_weather.core import canonical
+    with Store(replace(enabled(cfg),price_alert_enabled=True))as s:
+        s.bind(market,{});s.connection_started(AT)
+        send(s,market,make_raw('0.49',AT,bid='0.47'),AT)
+        put(s,market,[46]*25,AT+1);put(s,market,[48]*25,AT+2)
+        frozen=canonical(events(s))
+        send(s,market,make_raw('0.62',AT+3,bid='0.60'),AT+3)
+        assert len(alerts(s))==1
+        put(s,market,[40]*25,AT+4,issue=ISSUE-3600000)
+        assert canonical(events(s))==frozen
+        assert len(alerts(s))==1
+        assert not s.c.execute('pragma foreign_key_check').fetchall()
