@@ -91,13 +91,16 @@ def process(raw, received_ms, market, store, counters):
                 raise ValueError('INVALID_INPUT_BUDGET_EXHAUSTED')
 
 
-def observe(cfg, *, connect=None, stop=None, weather_fetch=None, lamp_fetch=None):
+def observe(cfg, *, connect=None, stop=None, weather_fetch=None, lamp_fetch=None, telegram_transport=None):
     if connect is None:
         from websockets.sync.client import connect
     from websockets.exceptions import ConnectionClosed, InvalidStatus, WebSocketException
     stop = stop or threading.Event(); counters=Counter(); reason='COMPLETED_WINDOW'; exit_code=0
     deadline=time.monotonic()+cfg.duration_seconds
-    weather=None;lamp=None
+    weather=None;lamp=None;sender=None
+    if cfg.telegram_enabled:
+        from .telegram import Sender,post,token_from_env
+        sender=Sender(token_from_env(),telegram_transport or post)
     with Store(cfg) as store:
         logger=logging.getLogger('holy_weather');logger.setLevel(logging.INFO);logger.propagate=False
         handler=RotatingFileHandler(store.root/'monitor.log',maxBytes=524288,backupCount=2)
@@ -124,6 +127,7 @@ def observe(cfg, *, connect=None, stop=None, weather_fetch=None, lamp_fetch=None
                         while not stop.is_set() and time.monotonic()<deadline:
                             if datetime.now(timezone.utc).astimezone(ZoneInfo(market['timezone'])).date().isoformat()!=market['date']:
                                 reason='MARKET_LOCAL_DATE_ENDED';stop.set();break
+                            if sender:sender.tick(store,millis())
                             if weather:weather.tick(store,market,millis())
                             if lamp:lamp.tick(store,market,millis())
                             if store.recovery_due(BASELINE_RECOVERY_SECONDS):
@@ -182,6 +186,7 @@ def observe(cfg, *, connect=None, stop=None, weather_fetch=None, lamp_fetch=None
             store.diagnostic('DISCOVERY_HTTP',str(exc.code),millis())
             return {'state':'DISCOVERY_DENIED' if exc.code in (401,403,429) else 'DISCOVERY_HTTP_ERROR','http':exc.code,'exit_code':2,'storage':store.stats()}
         finally:
+            if sender:sender.close(store)
             if weather:weather.close()
             if lamp:lamp.close()
             handler.close();logger.removeHandler(handler)

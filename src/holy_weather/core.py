@@ -62,8 +62,12 @@ class Config:
     price_alert_enabled: bool = False
     lamp_alert_enabled: bool = False
     lamp_peak_change_f: str = "2"
+    alert_queue_enabled: bool = False
+    telegram_enabled: bool = False
 
     def __post_init__(self):
+        if type(self.alert_queue_enabled)is not bool or type(self.telegram_enabled)is not bool or (self.telegram_enabled and not self.alert_queue_enabled):
+            raise ValueError("TELEGRAM_REQUIRES_ALERT_QUEUE")
         if type(self.lamp_alert_enabled)is not bool or (self.lamp_alert_enabled and (not self.lamp_context or self.city!="new-york")):
             raise ValueError("LAMP_ALERT_REQUIRES_KLGA_CONTEXT")
         if not isinstance(self.lamp_peak_change_f,str) or not 0<decimal(self.lamp_peak_change_f,price=False)<=20:
@@ -109,7 +113,7 @@ class Config:
         return self.date or now.astimezone(ZoneInfo(CITIES[self.city][2])).date().isoformat()
 
     def rule_hash(self):
-        return sha({k: v for k, v in asdict(self).items() if k not in ('data_dir', 'duration_seconds', 'max_reconnects', 'weather_context', 'lamp_context', 'price_alert_enabled', 'lamp_alert_enabled', 'lamp_peak_change_f')})
+        return sha({k: v for k, v in asdict(self).items() if k not in ('data_dir', 'duration_seconds', 'max_reconnects', 'weather_context', 'lamp_context', 'price_alert_enabled', 'lamp_alert_enabled', 'lamp_peak_change_f', 'alert_queue_enabled', 'telegram_enabled')})
 
 
 def normalize(message, received_ms, market, *, change=None):

@@ -48,6 +48,8 @@ def record(store,sample,status):
             discovery=store.c.execute("select input_id from latest where kind='discovery'").fetchone()
             if discovery:refs.add(discovery[0])
             for ref in refs:store.c.execute('insert into event_inputs values(?,?)',(ident,ref))
+            from .alert_queue import enqueue
+            enqueue(store,ident,event,market,sample['received_ms'])
             state['fired']+=levels;events.append(event)
         state['previous']=current
         store.c.execute('insert or replace into meta values(?,?)',(key,canonical(state)))
