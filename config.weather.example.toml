@@ -1,0 +1,8 @@
+# Stage 2, one finite New York/KLGA observation. Verify the day's exact bucket.
+city = "new-york"
+bucket = "46-47°F"
+duration_seconds = 120
+data_dir = "data"
+weather_context = true
+storage_bytes = 268435456
+quote_age_seconds = 90
