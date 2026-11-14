@@ -32,7 +32,12 @@ def replay(cfg, manifest_path):
     # Provider timestamps stay untouched and are checked by the normal engine.
     previous=at
     for line in bodies['stream'].decode().splitlines():
-        envelope=json.loads(line);current=receipt(envelope['received_at'])
+        envelope=json.loads(line)
+        if not isinstance(envelope,dict) or envelope.get('kind') not in ('frame','weather','lamp','control'):
+            raise ValueError('REPLAY_ENVELOPE_KIND')
+        if envelope['kind']=='control' and envelope.get('event') not in ('gap','error','disconnect'):
+            raise ValueError('REPLAY_ENVELOPE_KIND')
+        current=receipt(envelope['received_at'])
         if current<at:
             raise ValueError('REPLAY_FRAME_PRECEDES_GAMMA_RECEIPT')
         if current<previous:

@@ -7,7 +7,7 @@ import time
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
-from .core import sha
+from .core import sha, CITIES
 from .weather import WeatherPoller, millis, station_check
 
 SOURCE='https://lamp.mdl.nws.noaa.gov/cgi-bin/getlav.pl?sta=KLGA'
@@ -26,32 +26,38 @@ class _Pre(HTMLParser):
         if self.inside:self.blocks[-1]+=data
 
 
-def fetch_lamp(*,fetch=urlopen,clock=millis):
+def source_for(station):
+    if station not in {v[1] for v in CITIES.values()}:raise ValueError('LAMP_STATION')
+    return f'https://lamp.mdl.nws.noaa.gov/cgi-bin/getlav.pl?sta={station}'
+
+
+def fetch_lamp(*,station='KLGA',fetch=urlopen,clock=millis):
+    source=source_for(station)
     requested=clock()
     try:
-        with fetch(Request(SOURCE,headers={'User-Agent':'Holy-Weather/0.3 bounded-KLGA-research'}),timeout=5)as response:
+        with fetch(Request(source,headers={'User-Agent':'Holy-Weather/0.3 bounded-KLGA-research'}),timeout=5)as response:
             status=response.status;body=response.read(MAX_BODY+1)
         received=clock()
         if len(body)>MAX_BODY:
-            return dict(source=SOURCE,requested_ms=requested,received_ms=received,status='BODY_BOUND',terminal=True)
-        return dict(source=SOURCE,requested_ms=requested,received_ms=received,http=status,
+            return dict(source=source,requested_ms=requested,received_ms=received,status='BODY_BOUND',terminal=True)
+        return dict(source=source,requested_ms=requested,received_ms=received,http=status,
                     status='OK' if status==200 else 'NO_DATA' if status==204 else 'HTTP_ERROR',
                     terminal=status not in (200,204),raw_body=body.decode('utf-8'),sha256=sha(body))
     except HTTPError as exc:
-        return dict(source=SOURCE,requested_ms=requested,received_ms=clock(),http=exc.code,
+        return dict(source=source,requested_ms=requested,received_ms=clock(),http=exc.code,
                     status='ACCESS_DENIED' if exc.code in (401,403,429) else 'HTTP_ERROR',terminal=True)
     except (OSError,URLError,UnicodeError,ValueError)as exc:
-        return dict(source=SOURCE,requested_ms=requested,received_ms=clock(),status='NETWORK_OR_DECODE_ERROR',error=type(exc).__name__,terminal=True)
+        return dict(source=source,requested_ms=requested,received_ms=clock(),status='NETWORK_OR_DECODE_ERROR',error=type(exc).__name__,terminal=True)
 
 
 def decode(receipt,market,available_ms):
     station_check(market)
     requested,received=receipt['requested_ms'],receipt['received_ms']
-    if receipt['source']!=SOURCE:raise ValueError('LAMP_SOURCE')
+    if receipt['source']!=source_for(market['station']):raise ValueError('LAMP_SOURCE')
     if any(type(t)is not int for t in (requested,received,available_ms)) or not 0<=requested<=received<=available_ms:
         raise ValueError('LAMP_RECEIPT_CLOCK')
     state=dict(status=receipt['status'],received_ms=received,available_ms=available_ms,
-               source=SOURCE,hours=[],issue_ms=None,units='F',day=market['date'])
+               source=source_for(market['station']),hours=[],issue_ms=None,units='F',day=market['date'])
     if receipt['status']!='OK':return state
     raw=receipt['raw_body'];body=raw.encode()
     if len(body)>MAX_BODY or sha(body)!=receipt['sha256']:raise ValueError('LAMP_BODY_SHA_OR_BOUND')
@@ -91,7 +97,7 @@ def decode(receipt,market,available_ms):
 def update(previous,receipt,market,available_ms):
     try:state=decode(receipt,market,available_ms)
     except (ValueError,KeyError,TypeError,OverflowError)as exc:
-        state=dict(status='INVALID_DATA',reason=str(exc),source=SOURCE,hours=[],issue_ms=None,
+        state=dict(status='INVALID_DATA',reason=str(exc),source=source_for(market['station']),hours=[],issue_ms=None,
                    received_ms=receipt['received_ms'],available_ms=available_ms)
     previous=previous or {}
     state['duplicate']=False
@@ -148,7 +154,7 @@ def context(state,weather,market,event_ms):
         refs.add(state['poll_input_id'])
     seen=c_to_f(weather.get('observed_max_c'));last=weather.get('latest')
     delta=str(Decimal(peak)-Decimal(seen)) if peak is not None and seen is not None else None
-    return dict(status=status,source=SOURCE,issue_ms=state.get('issue_ms') if available else None,
+    return dict(status=status,station=market['station'],source=source_for(market['station']),issue_ms=state.get('issue_ms') if available else None,
                 received_ms=state.get('received_ms') if available else None,available_ms=state.get('available_ms') if available else None,
                 hours=remaining,future_peak_f=peak,metar_temperature_f=c_to_f(last['temperature_c'])if last else None,
                 observed_max_f=seen,peak_minus_observed_max_f=delta,lamp_below_observed_max=Decimal(delta)<0 if delta is not None else None,
@@ -178,12 +184,12 @@ def format_card(card):
     for side in ('YES','NO'):
         p=card['prices'].get(side,{})
         value='н/д' if p.get('ask')is None else str(Decimal(p['ask'])*100)+'¢'
-        prices.append(side+' ask '+value+' ['+p.get('status','NOT_AVAILABLE')+', '+p.get('freshness_now','UNKNOWN')+']')
+        prices.append(side+' ask '+value+' ['+p.get('status','NOT_AVAILABLE')+', '+p.get('freshness_now','UNKNOWN')+', '+p.get('observation_state','UNCONFIRMED')+']')
     distance=None
     if b.get('next_boundary_f') is not None and f.get('observed_max_f') is not None:
         distance=str(Decimal(b['next_boundary_f'])-Decimal(f['observed_max_f']))
     return '\n'.join([
-        'KLGA · информационный контекст · '+stamp(card['at_ms']),
+        f.get('station','н/д')+' · информационный контекст · '+stamp(card['at_ms']),
         'METAR: '+number(last['temperature_c'],'°C') if last else 'METAR: н/д',
         'Наблюдаемый максимум: '+number(f['observed_max_f'])+' (только полученные наблюдения)',
         'Будущий почасовой пик LAMP: '+number(f['future_peak_f'])+' ['+f['status']+']',
@@ -191,5 +197,5 @@ def format_card(card):
         'Бакет '+b.get('label','н/д')+': ['+b.get('lower_f','?')+', '+b.get('upper_f','?')+') °F; до следующей границы '+number(distance),
         ' | '.join(prices),
         'LAMP: заголовок '+stamp(f['issue_ms'])+'; получен '+stamp(f['received_ms']),
-        'Погода: '+w['freshness']+' / '+w['completeness']+'. Не вероятность и не сигнал к покупке.'
+        'Погода: '+w['freshness']+' / '+w['completeness']+'; источник '+w.get('provider_status','UNKNOWN')+'. Не вероятность и не сигнал к покупке.'
     ])

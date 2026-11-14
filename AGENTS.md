@@ -1,6 +1,6 @@
 # HOLY WEATHER development rules
 
-This private project is independent of POLYMETEO. Stages 1 and 2 are accepted. Implement stage 3 only: original hourly LAMP for KLGA, causal remaining-day forecast context, no own forecast model.
+This private project is independent of POLYMETEO. Stages 1–3 are accepted. Current scope: extend the existing AWC/LAMP context to the ten explicitly listed US cities, with station/rule/time checks and no own forecast model.
 
 - Use codex/ branches and small reviewable PRs. No automatic merging.
 - No production deployment, services, credentials, trading, own weather models or Telegram. Original AWC/LAMP only; no probabilities. Never change POLYMETEO or share its working databases.

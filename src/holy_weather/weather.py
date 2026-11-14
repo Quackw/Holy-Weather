@@ -1,4 +1,4 @@
-"""Bounded KLGA observations, never forecasts or official daily maxima."""
+"""Bounded station observations, never forecasts or official daily maxima."""
 from datetime import datetime, timezone
 from decimal import Decimal
 import json
@@ -10,7 +10,7 @@ import time
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
-from .core import sha
+from .core import sha, CITIES
 
 SOURCE = 'https://aviationweather.gov/api/data/metar?ids=KLGA&format=json&hours=24'
 MAX_BODY = 131072
@@ -24,34 +24,40 @@ def millis():
 
 
 def station_check(market):
-    if market['station'] != 'KLGA' or market['timezone'] != 'America/New_York':
-        raise ValueError('WEATHER_KLGA_ONLY')
+    if (market['station'],market['timezone']) not in {(v[1],v[2]) for v in CITIES.values()}:
+        raise ValueError('WEATHER_STATION_TIMEZONE')
 
 
-def fetch_weather(*, fetch=urlopen, clock=millis):
+def source_for(station):
+    if station not in {v[1] for v in CITIES.values()}:raise ValueError('WEATHER_STATION')
+    return f'https://aviationweather.gov/api/data/metar?ids={station}&format=json&hours=24'
+
+
+def fetch_weather(*, station="KLGA", fetch=urlopen, clock=millis):
+    source=source_for(station)
     requested = clock()
     try:
-        with fetch(Request(SOURCE, headers={'User-Agent': 'Holy-Weather/0.2 bounded-KLGA-research'}), timeout=5) as response:
+        with fetch(Request(source, headers={'User-Agent': 'Holy-Weather/0.2 bounded-KLGA-research'}), timeout=5) as response:
             status = response.status
             body = response.read(MAX_BODY + 1)
         received = clock()
         if len(body) > MAX_BODY:
-            return dict(source=SOURCE, requested_ms=requested, received_ms=received, status='BODY_BOUND', terminal=True)
-        return dict(source=SOURCE, requested_ms=requested, received_ms=received, http=status,
+            return dict(source=source, requested_ms=requested, received_ms=received, status='BODY_BOUND', terminal=True)
+        return dict(source=source, requested_ms=requested, received_ms=received, http=status,
                     status='OK' if status == 200 else 'NO_DATA' if status == 204 else 'HTTP_ERROR',
                     terminal=status not in (200, 204), raw_body=body.decode('utf-8'), sha256=sha(body))
     except HTTPError as exc:
-        return dict(source=SOURCE, requested_ms=requested, received_ms=clock(), http=exc.code,
+        return dict(source=source, requested_ms=requested, received_ms=clock(), http=exc.code,
                     status='ACCESS_DENIED' if exc.code in (401,403,429) else 'HTTP_ERROR', terminal=True)
     except (OSError, URLError, UnicodeError, ValueError) as exc:
-        return dict(source=SOURCE, requested_ms=requested, received_ms=clock(),
+        return dict(source=source, requested_ms=requested, received_ms=clock(),
                     status='NETWORK_OR_DECODE_ERROR', error=type(exc).__name__, terminal=True)
 
 
 def decode(receipt, market, available_ms):
     """All-or-nothing validation; preserve the exact raw response in the journal."""
     station_check(market)
-    if receipt['source'] != SOURCE:
+    if receipt['source'] != source_for(market['station']):
         raise ValueError('WEATHER_SOURCE')
     requested, received = receipt['requested_ms'], receipt['received_ms']
     if any(type(x) is not int for x in (requested, received, available_ms)) or not 0 <= requested <= received <= available_ms:
@@ -66,10 +72,11 @@ def decode(receipt, market, available_ms):
         raise ValueError('WEATHER_REPORT_BOUND')
     reports = []
     for row in rows:
+        if not isinstance(row,dict):raise ValueError('WEATHER_REPORT_OBJECT')
         raw = row.get('rawOb', '')
         if row.get('icaoId') != market['station'] or not isinstance(raw,str) or len(raw)>2048:
             raise ValueError('WEATHER_STATION_OR_RAW')
-        match = re.match(r'^(?:(METAR|SPECI)\s+)?(KLGA)\s+(\d{2})(\d{2})(\d{2})Z\b', raw)
+        match = re.match(r'^(?:(METAR|SPECI)\s+)?('+re.escape(market['station'])+r')\s+(\d{2})(\d{2})(\d{2})Z\b', raw)
         if not match:
             raise ValueError('WEATHER_RAW_STATION_OR_CLOCK')
         observed = row.get('obsTime')
@@ -89,10 +96,16 @@ def decode(receipt, market, available_ms):
         whole = int(group[1].replace('M','-'))
         if abs(Decimal(str(temp))-whole) > Decimal('0.6'):
             raise ValueError('WEATHER_TEMPERATURE_MISMATCH')
+        precise=re.findall(r'(?:^|\s)T([01])(\d{3})[01]\d{3}(?=\s|$)',raw)
+        if len(precise)>1:raise ValueError('WEATHER_AMBIGUOUS_PRECISE_TEMPERATURE')
+        if precise:
+            sign,value=precise[0]
+            exact=Decimal(value)/10*(-1 if sign=='1' else 1)
+            if Decimal(str(temp))!=exact:raise ValueError('WEATHER_PRECISE_TEMPERATURE_MISMATCH')
         local_date=utc.astimezone(ZoneInfo(market['timezone'])).date().isoformat()
         reports.append(dict(station=market['station'], raw_metar=raw, temperature_c=str(temp), units='C',
                             observed_ms=observed_ms, received_ms=received, available_ms=available_ms,
-                            local_date=local_date, source=SOURCE, correction='COR' in raw.split(),
+                            local_date=local_date, source=receipt['source'], correction='COR' in raw.split(),
                             report_type=match[1] or row.get('metarType','METAR'),
                             identity=sha([market['station'],observed_ms,raw,str(temp)])))
     return reports
@@ -128,7 +141,7 @@ def update(previous, receipt, market, available_ms):
     if len(records)>MAX_REPORTS:
         return dict(previous, status='WEATHER_STATE_BOUND', poll_available_ms=available_ms), flags
     if status=='OK' and not reports:status='NO_DATA'
-    return dict(records=sorted(records.values(),key=lambda r:r['observed_ms']), status=status,
+    return dict(station=market['station'], records=sorted(records.values(),key=lambda r:r['observed_ms']), status=status,
                 poll_received_ms=receipt['received_ms'],poll_available_ms=available_ms),flags
 
 
@@ -141,7 +154,7 @@ def context(state, event_ms, start_ms):
     last=valid[-1] if valid else None; previous=valid[-2] if len(valid)>1 else None
     age=event_ms-last['observed_ms'] if last else None
     quality='MISSING' if not last else 'STALE' if age>WEATHER_AGE_MS else 'FRESH'
-    return dict(station='KLGA', units='C', latest=last, previous=previous,
+    return dict(station=state.get('station',last['station'] if last else None), units='C', latest=last, previous=previous,
                 temperature_change_c=str(Decimal(last['temperature_c'])-Decimal(previous['temperature_c'])) if previous else None,
                 observed_max_c=str(max(Decimal(r['temperature_c']) for r in valid)) if valid else None,
                 official_daily_tmax=None, max_scope='RECEIVED_MARKET_DAY_OBSERVATIONS_ONLY',

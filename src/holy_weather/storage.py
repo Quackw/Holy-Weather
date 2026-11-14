@@ -35,6 +35,7 @@ class Store:
         self.seen_tops={}
         self.connected=False
         self.ready_tokens=set()
+        self.pending_baselines={}
         self.root = Path(cfg.data_dir).absolute()
         if self.root.is_symlink():
             raise StorageStop('SYMLINK_DATA_DIRECTORY')
@@ -146,16 +147,49 @@ class Store:
     def connection_started(self, at):
         self.gap('CONNECTION_BASELINE', at)
         self.connected=True
+        bound=self.c.execute('select payload from market where id=1').fetchone()
+        if bound:
+            self.pending_baselines={t:time.monotonic() for t in json.loads(bound[0])['tokens'].values()}
 
     def gap(self, reason, at):
         self.connected=False
         self.ready_tokens.clear()
+        self.pending_baselines.clear()
+        previous_tops=dict(self.seen_tops)
         self.seen_tops.clear()
         with self.transaction():
             for row in self.c.execute('select token,payload from state').fetchall():
-                self.c.execute('update state set payload=? where token=?', (canonical(reset(json.loads(row['payload']))), row['token']))
+                state=reset(json.loads(row['payload']))
+                state['high_source']=max(state['high_source'],previous_tops.get(row['token'],{}).get('source_ms',-1))
+                self.c.execute('update state set payload=? where token=?', (canonical(state), row['token']))
             self.c.execute('insert into diagnostics(received_ms,category,reason) values(?,?,?)', (at, 'GAP', reason[:300]))
             self.c.execute('delete from diagnostics where id not in (select id from diagnostics order by id desc limit 512)')
+
+    def invalidate(self,reason,at,token=None):
+        """Data continuity failed; transport may still be open. Await a new baseline."""
+        bound=self.c.execute('select payload from market where id=1').fetchone()
+        targets={token} if token else ({r[0] for r in self.c.execute('select token from state')} |
+                  (set(json.loads(bound[0])['tokens'].values()) if bound else set()))
+        with self.transaction():
+            for target in targets:
+                row=self.c.execute('select payload from state where token=?',(target,)).fetchone()
+                if row:
+                    state=reset(json.loads(row[0]))
+                    state['high_source']=max(state['high_source'],self.seen_tops.get(target,{}).get('source_ms',-1))
+                    self.c.execute('update state set payload=? where token=?',(canonical(state),target))
+            self.c.execute('insert into diagnostics(received_ms,category,reason) values(?,?,?)',
+                           (at,'GAP',('DATA:'+reason+(':'+token if token else ':ALL'))[:300]))
+            self.c.execute('delete from diagnostics where id not in (select id from diagnostics order by id desc limit 512)')
+        for target in targets:
+            self.ready_tokens.discard(target);self.seen_tops.pop(target,None)
+            if self.connected:self.pending_baselines.setdefault(target,time.monotonic())
+
+    def recovery_due(self,seconds):
+        return self.connected and bool(self.pending_baselines) and time.monotonic()-min(self.pending_baselines.values())>=seconds
+
+    def known_duplicate(self,sample):
+        return (self.seen_tops.get(sample.get('token'),{}).get('identity')==sample['id'] or
+                bool(self.c.execute('select 1 from inputs i join samples s on s.input_id=i.id where i.identity=?',(sample['id'],)).fetchone()))
 
     def apply(self, sample):
         raw = canonical(sample['raw']).encode()
@@ -204,6 +238,9 @@ class Store:
                     self.c.execute('insert into event_inputs values(?,?)', (ident, ref))
                 for ref in set(event.get('weather',{}).get('input_ids',[])) | set(event.get('lamp',{}).get('input_ids',[])):
                     self.c.execute('insert or ignore into event_inputs values(?,?)',(ident,ref))
+                for price in event.get('prices',{}).values():
+                    if price.get('input_id'):
+                        self.c.execute('insert or ignore into event_inputs values(?,?)',(ident,price['input_id']))
                 discovery=self.c.execute("select input_id from latest where kind='discovery'").fetchone()
                 if discovery:self.c.execute('insert or ignore into event_inputs values(?,?)',(ident,discovery[0]))
             result={'status': status, 'events': events,'raw_bytes':len(raw),'compressed_bytes':len(compressed)}
@@ -211,8 +248,10 @@ class Store:
         if quote:
             if status=='FRESH' and sample['kind'] in ('book','best_bid_ask'):
                 self.ready_tokens.add(sample['token'])
+                self.pending_baselines.pop(sample['token'],None)
             elif status!='FRESH':
                 self.ready_tokens.discard(sample['token'])
+                if self.connected:self.pending_baselines.setdefault(sample['token'],time.monotonic())
         return result
 
     def lamp_state(self):
@@ -257,6 +296,7 @@ class Store:
                 result[side]={'ask':None,'status':'NOT_AVAILABLE'}
             else:
                 result[side]={k:r[k]for k in ('input_id','bid','ask','source_ms','received_ms','freshness_now','status','quote_usable_now')}
+            result[side]['observation_state']=snapshot['observation']['sides'][side]
         return result
 
     def forecast_card(self,at_ms):
@@ -313,14 +353,14 @@ class Store:
         with self.transaction():
             self.c.execute('insert or replace into meta values(?,?)', (key, canonical(value)))
 
-    def reject(self, raw, reason, at):
+    def reject(self, raw, reason, at, token=None):
         value=canonical(raw).encode()
         if len(value)>262144:
             value=canonical({'rejected_sha256':sha(value),'reason':'REJECTED_INPUT_TOO_LARGE'}).encode()
         with self.transaction():
             self.c.execute('insert or ignore into inputs(identity,received_ms,raw,raw_sha) values(?,?,?,?)',
                            (sha(value),at,zlib.compress(value,3),sha(value)))
-        self.gap('INVALID_INPUT:'+reason,at)
+        self.invalidate('INVALID_INPUT:'+reason,at,token)
 
     def stats(self, *, now_ms=None):
         now_ms=int(time.time()*1000) if now_ms is None else now_ms
@@ -372,7 +412,9 @@ class Store:
         """
         cutoff = now_ms-24*3600*1000
         query = '''select id from inputs where received_ms<? and id not in
-                   (select input_id from event_inputs union select input_id from events union select input_id from latest)'''
+                   (select input_id from event_inputs union select input_id from events union select input_id from latest
+                    union select json_extract(p.value,'$.input_id') from events e, json_each(e.payload,'$.prices') p
+                    where json_extract(p.value,'$.input_id') is not null)'''
         candidates = [r[0] for r in self.c.execute(query, (cutoff,))]
         if apply:
             with self.transaction():

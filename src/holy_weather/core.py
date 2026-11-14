@@ -14,7 +14,14 @@ from zoneinfo import ZoneInfo
 
 CITIES = {'new-york': ('nyc', 'KLGA', 'America/New_York'),
           'atlanta': ('atlanta', 'KATL', 'America/New_York'),
-          'seattle': ('seattle', 'KSEA', 'America/Los_Angeles')}
+          'seattle': ('seattle', 'KSEA', 'America/Los_Angeles'),
+          'miami': ('miami', 'KMIA', 'America/New_York'),
+          'chicago': ('chicago', 'KORD', 'America/Chicago'),
+          'dallas': ('dallas', 'KDAL', 'America/Chicago'),
+          'austin': ('austin', 'KAUS', 'America/Chicago'),
+          'houston': ('houston', 'KHOU', 'America/Chicago'),
+          'los-angeles': ('los-angeles', 'KLAX', 'America/Los_Angeles'),
+          'san-francisco': ('san-francisco', 'KSFO', 'America/Los_Angeles')}
 
 
 def canonical(value):
@@ -56,8 +63,8 @@ class Config:
     def __post_init__(self):
         if type(self.lamp_context)is not bool or (self.lamp_context and not self.weather_context):
             raise ValueError("LAMP_REQUIRES_WEATHER_CONTEXT")
-        if type(self.weather_context) is not bool or (self.weather_context and self.city != "new-york"):
-            raise ValueError("WEATHER_KLGA_ONLY")
+        if type(self.weather_context) is not bool:
+            raise ValueError("WEATHER_CONTEXT_BOOLEAN")
         if self.city not in CITIES or not isinstance(self.bucket, str) or not 1 <= len(self.bucket) <= 80:
             raise ValueError('CITY_OR_BUCKET')
         limits = {'duration_seconds': (1, 3600), 'storage_bytes': (8*1024*1024, 256*1024*1024),
@@ -159,6 +166,7 @@ def normalize(message, received_ms, market, *, change=None):
 
 def reset(state):
     state = deepcopy(state)
+    state['high_source']=max(x for x in (state.get('high_source'),state.get('last_source'),-1) if x is not None)
     state.update(points=[], excursion=None, last_source=None)
     return state
 
@@ -170,7 +178,7 @@ def evolve(previous, sample, cfg):
     age = sample['received_ms'] - sample['source_ms']
     status = ('FUTURE' if age < 0 else 'STALE' if age > cfg.quote_age_seconds*1000 else
               'MISSING_ASK' if sample['ask'] is None else
-              'OUT_OF_ORDER' if state['last_source'] is not None and sample['source_ms'] < state['last_source'] else 'FRESH')
+              'OUT_OF_ORDER' if sample['source_ms'] < max(x for x in (state.get('high_source'),state.get('last_source'),-1) if x is not None) else 'FRESH')
     if status != 'FRESH':
         return reset(state), [], status
     point = {k: sample[k] for k in ('source_ms', 'received_ms', 'ask', 'input_id')}
@@ -216,5 +224,5 @@ def evolve(previous, sample, cfg):
         points.append(point)
     if len(points) > 4096:
         return reset(state), [], 'ENGINE_POINT_BOUND'
-    state.update(points=points, excursion=excursion, last_source=sample['source_ms'])
+    state.update(points=points, excursion=excursion, last_source=sample['source_ms'],high_source=sample['source_ms'])
     return state, events, 'FRESH'
