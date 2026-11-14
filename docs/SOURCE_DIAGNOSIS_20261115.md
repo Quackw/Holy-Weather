@@ -57,13 +57,49 @@ No schema migration, new service, dependency, notification rule or probability
 model is added. The native PRICE/LAMP algorithms and queue remain independent.
 Production and Telegram sending are outside this change.
 
-Live qualification is pending separate payload authorization after automatic
-review rejected the new remote diagnostic script. Its intended scope is one
-Seattle station-local day, at most three exact rule-verified candidates, two
-bounded CLOB books per candidate, and one 120-second observation on the first
-candidate whose real books are complete and no older than 90 seconds. No
-reconnects or automatic second observation. If no candidate passes, the record
-remains pending; no fresh state or signal will be invented.
+## Authorized finite qualification
+
+The user approved manifest
+`4205d86e96b09fdb078b6ad237d46eb73849e8ea0c73de5f6e570103ef40750d`
+after automatic review required exact-payload consent. One execution completed
+at 00:25 Kyiv on November 15 (22:25 UTC November 14; Seattle market day November
+14), using the existing pinned identity and a fresh owned temporary directory.
+All package and dependency pins matched. Production and Telegram were untouched.
+
+Gamma's actual response headers establish HTTP caching: `Age: 149`,
+`Cache-Control: public, max-age=300`. These headers prove that this response was
+cached and can explain a lag in indicative fields; they do not retroactively
+prove the precise cause of every field difference in the previous capture.
+
+Two candidates had indicative two-sided Gamma prices and were checked with four
+independent CLOB book reads. Both sides of 60–61°F and 62–63°F had actual bid/ask
+levels, but all four book source timestamps were 132.811–132.955 seconds old.
+The unchanged 90-second eligibility check rejected them. CLOB responses had
+current HTTP Date headers and `cf-cache-status: DYNAMIC`; HTTP receipt time was
+not substituted for their older book timestamps.
+
+No candidate passed. The run returned `NO_VERIFIED_FRESH_COMPLETE_CANDIDATE`:
+no application observation, WebSocket, SQLite, PRICE event or queue record was
+started. There was no reconnect, second observation or different-account/endpoint
+fallback. This is a pending fresh-quote acceptance, not proof that a later stream
+could not deliver fresh updates.
+
+The single AWC timing request returned HTTP 200 in 0.361 seconds: DNS about
+10 ms, TCP about 22 ms, TLS about 40 ms, first byte about 361 ms. Its 13,213-byte
+body passed the native decoder: 24 reports, 14 on the Seattle market day; latest
+KSEA observation 21:53 UTC, 15.6°C. Thus AWC access and actual data were available
+in this diagnostic. The historical timeout's exact network phase remains unknown,
+and the native application's post-timeout recovery was not exercised live because
+that application was not started. Scheduled recovery remains covered by tests.
+
+The run's 11 copied artifacts total 116,997 bytes. Every artifact and HTTP-body
+SHA matches. No SQLite integrity result is claimed for this run because no SQLite
+was created. Existing historical artifacts remain untouched. The source fix has
+233 passing local tests and successful Linux CI at `7ad0bac`; synthetic tests and
+HTTP success do not establish live PRICE readiness or Telegram delivery.
+
+Verdict: **PARTIAL**. Gamma caching is confirmed and AWC availability demonstrated;
+fresh complete native quotes and the old cross-source difference remain pending.
 
 Existing real artifacts remain in ignored evidence directories with their
 original SHA. Synthetic regression success is not a live-source acceptance.
