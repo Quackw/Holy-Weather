@@ -19,9 +19,10 @@ def test_unchanged_confirmations_are_bounded_and_keep_latest_clock(cfg,market):
         assert not s.stats()['events']
 
 
-def test_price_changes_are_not_dropped_by_confirmation_coalescing(cfg,market):
+def test_price_changes_are_not_dropped_by_confirmation_coalescing(cfg,market,make_raw):
     c=Counter();at=1794650000000
     with Store(cfg)as s:
+        app.process(json.dumps(make_raw('0.699',at-1,bid='0.60')),at-1,market,s,c)
         for i,ask in enumerate(['0.699','0.701','0.699','0.702']):app.process(json.dumps(delta(market,at+i*1000,ask)),at+i*1000,market,s,c)
         assert s.stats()['samples']==4
         assert s.stats()['events']=={'DETECTED':1,'SUPPRESSED':2}

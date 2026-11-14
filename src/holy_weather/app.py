@@ -63,14 +63,9 @@ def process(raw, received_ms, market, store, counters):
                 counters['coalesced_unchanged_top_confirmations']+=1;continue
             result = store.apply(sample)
             counters[result['status']] += 1
-            if quote and result['status']!='DUPLICATE':
-                if result['status']=='FRESH' and sample['kind'] in ('book','best_bid_ask'):
-                    store.ready_tokens.add(sample['token'])
-                elif result['status']!='FRESH':
-                    store.ready_tokens.discard(sample['token'])
             counters['stored_input_raw_bytes']+=result.get('raw_bytes',0)
             counters['stored_input_compressed_bytes']+=result.get('compressed_bytes',0)
-            if quote and result['status']in ('FRESH','MISSING_ASK'):
+            if quote and result['status']in ('FRESH','MISSING_ASK','AWAITING_BASELINE'):
                 store.seen_tops[sample['token']]={'top':(sample['bid'],sample['ask']),'source_ms':sample['source_ms'],'received_ms':received_ms,'persisted_ms':received_ms,'identity':sample['id']}
             elif quote and result['status']!='DUPLICATE':
                 store.seen_tops.pop(sample['token'],None)

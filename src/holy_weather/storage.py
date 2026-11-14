@@ -177,7 +177,13 @@ class Store:
             sample = dict(sample, input_id=input_id)
             row = self.c.execute('select payload from state where token=?', (sample['token'],)).fetchone()
             previous = json.loads(row[0]) if row else None
+            quote=sample['kind']!='last_trade_price'
+            awaiting=quote and sample['token'] not in self.ready_tokens
+            if awaiting and previous:
+                previous=reset(previous)
             state, events, status = evolve(previous, sample, self.cfg)
+            if awaiting and sample['kind']=='price_change' and status=='FRESH':
+                state, events, status = reset(previous if previous is not None else state), [], 'AWAITING_BASELINE'
             self.c.execute('insert or replace into state values(?,?)', (sample['token'], canonical(state)))
             keys = ('token','kind','source_ms','received_ms','bid','ask','bid_size','ask_size','trade','trade_size','snapshot_trade')
             self.c.execute('insert into samples values(?,?,?,?,?,?,?,?,?,?,?,?,?)', (input_id, *(sample[k] for k in keys), status))
@@ -190,7 +196,14 @@ class Store:
                     self.c.execute('insert into event_inputs values(?,?)', (ident, ref))
                 discovery=self.c.execute("select input_id from latest where kind='discovery'").fetchone()
                 if discovery:self.c.execute('insert or ignore into event_inputs values(?,?)',(ident,discovery[0]))
-            return {'status': status, 'events': events,'raw_bytes':len(raw),'compressed_bytes':len(compressed)}
+            result={'status': status, 'events': events,'raw_bytes':len(raw),'compressed_bytes':len(compressed)}
+        # Readiness changes only after the input/state transaction commits.
+        if quote:
+            if status=='FRESH' and sample['kind'] in ('book','best_bid_ask'):
+                self.ready_tokens.add(sample['token'])
+            elif status!='FRESH':
+                self.ready_tokens.discard(sample['token'])
+        return result
 
     def set_meta(self, key, value):
         with self.transaction():

@@ -75,3 +75,29 @@ def test_delta_without_full_baseline_is_not_ready(cfg,market):
             process(json.dumps({'event_type':'price_change','market':market['condition_id'],'timestamp':str(AT),
                 'price_changes':[{'asset_id':token,'best_bid':'0.4','best_ask':'0.5'}]}),AT,market,store,Counter())
         assert set(store.stats(now_ms=AT)['observation']['sides'].values())=={'AWAITING_BASELINE'}
+
+
+@pytest.mark.parametrize('baseline_kind',['book','best_bid_ask'])
+def test_prebaseline_deltas_cannot_become_signal(cfg,market,make_raw,baseline_kind):
+    counters=Counter();token=market['tokens']['YES']
+    def delta(store,price,offset):
+        process(json.dumps({'event_type':'price_change','market':market['condition_id'],
+            'timestamp':str(AT+offset),'price_changes':[{'asset_id':token,'best_bid':'0.4','best_ask':price}]}),
+            AT+offset,market,store,counters)
+    with Store(cfg) as store:
+        setup(store,market)
+        delta(store,'0.49',0);delta(store,'0.71',1000)
+        assert store.stats(now_ms=AT+1000)['events']=={}
+        assert counters['AWAITING_BASELINE']==2
+        assert store.stats(now_ms=AT+1000)['observation']['sides']['YES']=='AWAITING_BASELINE'
+        # Full quote cannot compare against either unconfirmed delta.
+        quote(store,market,make_raw,token,at=AT+2000,ask='0.69',kind=baseline_kind)
+        assert store.stats(now_ms=AT+2000)['events']=={}
+        delta(store,'0.71',3000)
+        events=store.c.execute('select payload from events').fetchall()
+        assert len(events)==1
+        event=json.loads(events[0][0])
+        assert event['type']=='CROSS' and event['status']=='DETECTED' and event['level']=='0.70'
+        assert [p['received_ms'] for p in event['evidence']]==[AT+2000,AT+3000]
+        assert store.stats(now_ms=AT+3000)['samples']==4
+        assert counters['DETECTED']==1

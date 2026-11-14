@@ -147,3 +147,20 @@ The original database SHA is recorded above. Evidence is outside Git.
 No additional provider traffic or live installation is necessary for these
 replay/status corrections. Linux regression verification is the PR's offline
 GitHub Actions `tests` job; its result must be green before acceptance.
+
+## Final baseline regression — 14 November 2026
+
+Two price changes before a full baseline previously could create a stored event
+although observation readiness remained unconfirmed. Storage now retains those
+samples as `AWAITING_BASELINE`, without events or comparison windows. The first
+valid book/BBO starts a new baseline, and only a subsequent change can create an
+event with evidence from that baseline onward. Readiness changes after commit.
+The original event thresholds and gates are unchanged; unconfirmed deltas do not
+rearm gates. This applies independently per token, including after a gap/restart.
+
+Both book and BBO baseline regressions pass. The existing delta/coalescing test
+now supplies its required baseline explicitly. Total: 59 offline tests locally;
+Linux CI must pass on the final commit before acceptance. The saved real stream
+still produces one detected event and six suppressed events in two identical
+cold replays. Original artifact hashes, old database rows and integrity checks
+remain unchanged. No schema migration, provider traffic or production change.
