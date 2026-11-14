@@ -16,8 +16,8 @@ or explicit REJECTED/UNKNOWN. Crash before request may lose delivery but cannot
 blindly resend an uncertain request. Confirmed and uncertain keys persist across
 restart. No exactly-once network claim. Pending events resume when eligible; PRICE
 expires at its configured source freshness limit (<=90s), LAMP at issue+2h; both
-expire after local contract day. Final expiry is checked again before HTTP. Cards
-label quote/stream values as event-time evidence, not a fresh execution price.
+expire after local contract day. Final expiry is checked again before HTTP. Cards show the approved short format without clock or technical-status lines.
+Full clocks, state and evidence remain in originating events and the journal.
 
 One daemon HTTP worker, no SQLite access from that worker. The existing writer
 claims and records acknowledgements; collection continues while HTTP waits. A
@@ -51,7 +51,7 @@ permission does not authorize these messages. Never paste a token into chat.
 
 ## Qualification
 
-218 tests pass: all existing 207 plus queue persistence, separate types, SENT and
+219 tests pass: all existing 207 plus queue persistence, separate types, SENT and
 UNKNOWN restart suppression, expiry, exact-preview tampering, atomic enqueue
 rollback, retention, queue bounds, worker timeout with continued market ingestion,
 verified ACK text/link and pre-HTTP expiry. All Telegram responses are synthetic.

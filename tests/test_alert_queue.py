@@ -122,3 +122,13 @@ def test_transport_refuses_expiry_without_http(cfg,market,make_raw):
         seed(s,market,make_raw);p=preview(s,keys(s)[0]);calls=[]
         r=post('unused',p,clock=lambda:p['expires_ms']+1,fetch=lambda *a,**k:calls.append(1))
         assert r['status']=='REJECTED' and not calls
+
+def test_short_cards_without_clock_or_technical_status(cfg,market,make_raw):
+    with Store(config(cfg))as s:
+        seed(s,market,make_raw)
+        for k in keys(s):
+            html=preview(s,k)['html']
+            assert 'Market ↗' in html
+            assert 'UTC' not in html and 'Kyiv' not in html
+            assert 'READY' not in html and 'N/A' not in html
+            assert len(html.splitlines())==5

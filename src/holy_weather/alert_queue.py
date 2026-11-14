@@ -20,27 +20,19 @@ def card(event,market,at):
     if p.scheme!='https' or p.netloc!='polymarket.com' or len(p.path.strip('/').split('/'))!=3 or p.query or p.fragment:raise ValueError('EXACT_BUCKET_LINK_REQUIRED')
     city=next(k for k,v in CITIES.items() if v[1]==market['station']).replace('-',' ').title()
     link='<a href="'+escape(url,quote=True)+'">'+escape(event['bucket'])+'</a>'
+    market_link='<a href="'+escape(url,quote=True)+'">Market ↗</a>'
+    title=escape(city)+' · '+escape(event['bucket'])
     if event['type']=='PRICE_ALERT':
         a,b=event['previous'],event['current']
-        lines=['📈 <b>PRICE ALERT</b>',escape(city)+' · '+market['date']+' · '+event['side']+' · '+link,
+        lines=['📈 <b>PRICE ALERT</b>',escape(city)+' · '+event['side']+' · '+escape(event['bucket']),
                'Midpoint: <b>'+num(Decimal(a['midpoint'])*100)+'% → '+num(Decimal(b['midpoint'])*100)+'%</b>',
-               'Crossed '+', '.join(num(Decimal(t)*100)+'%' for t in event['thresholds']),
-               stamp(at)+' · Stream confirmed at event · Quote age '+str(at-b['source_ms'])+'ms at event']
+               'Crossed: '+ ' · '.join(num(Decimal(t)*100)+'%' for t in event['thresholds']),market_link]
         expires=b['source_ms']+90000
     else:
-        f=event['current_forecast'];w=event.get('weather',{});last=w.get('latest')
-        current='N/A' if not last else num(Decimal(last['temperature_c'])*Decimal('1.8')+32)+'°F'
-        seen='N/A' if event.get('observed_max_f') is None else num(event['observed_max_f'])+'°F'
-        prices=[]
-        for side in ('YES','NO'):
-            q=event['prices'].get(side,{})
-            prices.append(side+' ask '+(num(Decimal(q['ask'])*100)+'¢' if q.get('ask') is not None else 'N/A')+' ['+('fresh' if q.get('observation_state')=='READY' else 'unconfirmed')+' at event]')
-        reason='Crossed '+', '.join(event['crossed_boundaries_f'])+'°F' if event['crossed_boundaries_f'] else 'Peak changed '+num(event['change_f'])+'°F'
-        lines=['☀️ <b>LAMP ALERT</b>',escape(city)+' · '+market['date']+' · '+link,
-               'Future peak: <b>'+num(event['previous_peak_f'])+'°F → '+num(event['future_peak_f'])+'°F</b>',
-               reason,'METAR '+current+' · Observed max '+seen+' ['+w.get('freshness','MISSING').lower()+']',
-               ' · '.join(prices),'Issued '+stamp(f['issue_ms'])+' · Received '+stamp(f['received_ms']),
-               'Forecast warning · '+stamp(at)]
+        f=event['current_forecast']
+        reason='Crossed boundary: '+', '.join(event['crossed_boundaries_f'])+'°F' if event['crossed_boundaries_f'] else 'Peak change: '+num(event['change_f'])+'°F'
+        lines=['☀️ <b>LAMP ALERT</b>',title,
+               'Forecast peak: <b>'+num(event['previous_peak_f'])+'°F → '+num(event['future_peak_f'])+'°F</b>',reason,market_link]
         expires=f['issue_ms']+7200000
     text='\n'.join(lines)
     if len(text)>3500:raise ValueError('CARD_BOUND')
