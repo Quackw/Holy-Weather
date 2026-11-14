@@ -59,3 +59,36 @@ and long-run storage are not proven. No network collection or Telegram sends.
 
 Next: accept this PR before independent LAMP PR C. Any live qualification requires
 an explicitly bounded run; real Telegram remains a separate PR D and approval.
+
+## Pre-acceptance review — 14 November
+
+**Acceptance recommendation: HOLD pending unchanged-quote storage optimization.**
+Nine PRICE tests now include all five consumed levels surviving restart and 20
+recross updates (each duplicated), high first quote after restart, and an injected
+SQLite event-insert failure proving fired flags roll back atomically. No false
+or repeated PRICE events occurred in these scenarios. This is synthetic fault
+coverage, not a guarantee for every possible feed failure.
+
+Controlled local comparison: identical 6,000 BBO confirmations, unchanged bid/ask,
+10 updates/second over 600 simulated seconds, one token and one contract. No real
+network, Telegram or production. Original source code under review is unchanged.
+
+| Metric | Flag off | Flag on |
+| --- | ---: | ---: |
+| Stored inputs including discovery | 41 | 6,001 |
+| PRICE events | 0 | 0 |
+| Closed directory bytes | 86,036 | 2,711,572 |
+| Sampled peak directory bytes, including WAL/SHM | 658,580 | 3,292,596 |
+| SQLite integrity | ok | ok |
+
+Peak sampled every 100 inputs, not a guaranteed absolute peak. Closed directory
+includes the owned marker/lock. The enabled case used about 31.5 times the closed
+space on this quiet feed because coalescing was disabled. This is a synthetic
+load comparison, not measured daily production growth. The budget remains 256 MiB;
+more frequent writes can reach its stop boundary earlier. Do not extrapolate this
+single-token test into a fleet lifetime or production SLA.
+
+Next correction should restore bounded unchanged confirmations while keeping
+midpoint continuity, restart baselines and evidence retention correct. Re-run the
+same load and regression tests before acceptance. PR remains unmerged. No schema
+migration or source-history changes were performed by this review.

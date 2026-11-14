@@ -77,3 +77,42 @@ def test_retention_protects_midpoint_evidence(cfg,market,make_raw):
         send(s,market,make_raw('0.62',AT+1,bid='0.60'),AT+1)
         assert len(alerts(s))==1
         assert not s.c.execute('pragma foreign_key_check').fetchall()
+
+def test_all_fired_survive_restart_and_recross(cfg,market,make_raw):
+    cfg=replace(cfg,price_alert_enabled=True)
+    with Store(cfg)as s:
+        s.bind(market,{});s.connection_started(AT)
+        send(s,market,make_raw('0.49',AT,bid='0.47'),AT)
+        send(s,market,make_raw('0.82',AT+1,bid='0.80'),AT+1)
+        assert len(alerts(s))==1 and len(alerts(s)[0]['thresholds'])==5
+    with Store(cfg)as s:
+        s.connection_started(AT+2)
+        for i in range(20):
+            ask,bid=('0.49','0.47') if i%2==0 else ('0.82','0.80')
+            r=make_raw(ask,AT+3+i,bid=bid)
+            send(s,market,r,AT+3+i);send(s,market,r,AT+3+i)
+        assert len(alerts(s))==1
+
+def test_restart_high_first_quote_is_not_cross(cfg,market,make_raw):
+    cfg=replace(cfg,price_alert_enabled=True)
+    with Store(cfg)as s:
+        s.bind(market,{});s.connection_started(AT)
+        send(s,market,make_raw('0.49',AT,bid='0.47'),AT)
+    with Store(cfg)as s:
+        s.connection_started(AT+1)
+        send(s,market,make_raw('0.82',AT+2,bid='0.80'),AT+2)
+        assert not alerts(s)
+
+def test_cross_transaction_failure_preserves_unfired(cfg,market,make_raw):
+    import sqlite3
+    import pytest
+    with Store(replace(cfg,price_alert_enabled=True))as s:
+        s.bind(market,{});s.connection_started(AT)
+        send(s,market,make_raw('0.49',AT,bid='0.47'),AT)
+        s.c.execute("CREATE TEMP TRIGGER fail_price BEFORE INSERT ON events WHEN NEW.type='PRICE_ALERT' BEGIN SELECT RAISE(ABORT,'injected'); END")
+        with pytest.raises(sqlite3.IntegrityError):send(s,market,make_raw('0.82',AT+1,bid='0.80'),AT+1)
+        state=json.loads(s.c.execute("select value from meta where key like 'price_alert_v1:%'").fetchone()[0])
+        assert state['fired']==[] and not alerts(s)
+        s.c.execute('DROP TRIGGER fail_price')
+        send(s,market,make_raw('0.82',AT+1,bid='0.80'),AT+1)
+        assert len(alerts(s))==1
