@@ -1,0 +1,16 @@
+# One contract, selected exactly by its native Gamma bucket label.
+city = "new-york"
+bucket = "46-47°F"
+# Omit date to require the current station-local date. No automatic rollover.
+# date = "2026-11-14"
+duration_seconds = 120
+data_dir = "data"
+storage_bytes = 268435456
+quote_age_seconds = 90
+move = "0.10"
+window_seconds = 900
+levels = ["0.50", "0.70", "0.90"]
+return_fraction = "0.50"
+hysteresis = "0.02"
+cooldown_seconds = 300
+max_reconnects = 3
