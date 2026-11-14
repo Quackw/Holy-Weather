@@ -40,9 +40,12 @@ same database and retains new history. Existing schema readers can read records;
 PRICE-specific consumers must filter event type. Full old-binary live rollback
 has not been run; no deployment is requested. No durable sender is added here.
 
-With this flag enabled, unchanged quote coalescing is disabled to ensure a fresh
-midpoint baseline/evidence is not skipped. This increases input volume; the same
-256-MiB budget still stops capture before exhaustion. Long-run growth is unmeasured.
+Unchanged top confirmations are coalesced with the existing 15-second checkpoint
+in both modes. Every changed bid/ask is stored. An unconfirmed PRICE baseline
+forces a BBO write even when its top matches. In-memory source/receipt high-water
+advances on coalesced confirmations; checkpoint inputs retain their own clocks,
+not the later confirmation clocks. Original unchanged raw frames remain intentionally
+unarchived. The 256-MiB budget is unchanged; real long-run growth is unmeasured.
 
 ## Qualification
 
@@ -62,7 +65,7 @@ an explicitly bounded run; real Telegram remains a separate PR D and approval.
 
 ## Pre-acceptance review — 14 November
 
-**Acceptance recommendation: HOLD pending unchanged-quote storage optimization.**
+**Historical pre-fix finding (resolved by the coalescing correction below).**
 Nine PRICE tests now include all five consumed levels surviving restart and 20
 recross updates (each duplicated), high first quote after restart, and an injected
 SQLite event-insert failure proving fired flags roll back atomically. No false
@@ -92,3 +95,40 @@ Next correction should restore bounded unchanged confirmations while keeping
 midpoint continuity, restart baselines and evidence retention correct. Re-run the
 same load and regression tests before acceptance. PR remains unmerged. No schema
 migration or source-history changes were performed by this review.
+
+
+## Coalescing correction acceptance
+
+Restored the existing unchanged-top checkpoint path for both flag values. PRICE
+requires its own ready baseline before coalescing BBO confirmations. Real changes
+are never coalesced. Repeated exact-duplicate diagnostics are sampled at count 1
+and each 128th occurrence; the returned runtime Counter retains the exact total.
+No SQL diagnostic is written for each unchanged PRICE checkpoint with no event.
+Diagnostic table remains bounded at 512 rows. The aggregate counter is per run,
+not a new durable lifetime metric.
+
+Exact repeat of the previous 6,000-frame load (600 simulated seconds, one token,
+unchanged BBO at 10 Hz):
+
+| Metric | OFF | ON |
+| --- | ---: | ---: |
+| Samples | 40 | 40 |
+| Inputs including discovery | 41 | 41 |
+| PRICE events | 0 | 0 |
+| Closed directory bytes | 86,036 | 86,036 |
+| Sampled peak including WAL/SHM | 658,580 | 666,796 |
+| SQLite integrity | ok | ok |
+
+ON/OFF closed-size ratio is 1.00; sampled peak ratio about 1.0125. The same limit
+was used. This is measured synthetic quiet-feed behavior, not a daily forecast.
+A regression also feeds 6,000 exact duplicates and checks at most 48 diagnostic
+rows, exact counters and no new events.
+
+194 regression tests cover bid-only midpoint crossing, MULTI-CROSS, crossing right
+after checkpoint, GAP and restart between checkpoints, retained fired thresholds,
+missing bid/ask, old clocks, duplicate inputs, SQLite transaction failure and
+protected evidence. Two clean saved New York replays produced identical counters
+and event records, passed source SHA checks and database integrity; zero real
+PRICE events (connection evidence absent). No source history or schema changed.
+READY for PR review on this scope, subject to green exact-commit Linux CI. No
+merge, production action, AWC/LAMP changes or Telegram sends.

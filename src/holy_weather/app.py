@@ -61,15 +61,17 @@ def process(raw, received_ms, market, store, counters):
             if sample is None:
                 counters['ignored_depth_or_control']+=1;continue
             if store.known_duplicate(sample):
-                store.diagnostic('DUPLICATE','EXACT_PREVIOUSLY_SEEN_SAMPLE',received_ms)
-                counters['DUPLICATE']+=1;continue
+                counters['DUPLICATE']+=1
+                if counters['DUPLICATE']==1 or counters['DUPLICATE']%128==0:
+                    store.diagnostic('DUPLICATE','EXACT_PREVIOUSLY_SEEN_SAMPLE:COUNT='+str(counters['DUPLICATE']),received_ms)
+                continue
             quote=sample['kind']not in ('last_trade_price','market_resolved')
             previous=store.seen_tops.get(sample.get('token')) if quote else None
             if previous and sample['source_ms']<previous['source_ms']:
                 store.reject(message,'OUT_OF_ORDER_CONFIRMATION',received_ms,sample['token']);counters['OUT_OF_ORDER']+=1;continue
             if previous and received_ms<previous.get('received_ms',previous['persisted_ms']):
                 store.reject(message,'RECEIPT_CLOCK_REVERSED',received_ms,sample['token']);counters['RECEIPT_CLOCK_REVERSED']+=1;continue
-            if not store.cfg.price_alert_enabled and quote and previous and (sample['kind']!='best_bid_ask' or sample['token'] in store.ready_tokens) and sample['id']!=previous['identity']and sample['kind']in ('price_change','best_bid_ask')and(sample['bid'],sample['ask'])==previous['top']and 0<=received_ms-sample['source_ms']<=store.cfg.quote_age_seconds*1000 and 0<=received_ms-previous['persisted_ms']<15000:
+            if quote and previous and (not store.cfg.price_alert_enabled or sample['kind']!='best_bid_ask' or sample['token'] in store.price_alert_ready) and (sample['kind']!='best_bid_ask' or sample['token'] in store.ready_tokens) and sample['id']!=previous['identity']and sample['kind']in ('price_change','best_bid_ask')and(sample['bid'],sample['ask'])==previous['top']and 0<=received_ms-sample['source_ms']<=store.cfg.quote_age_seconds*1000 and 0<=received_ms-previous['persisted_ms']<15000:
                 store.seen_tops[sample['token']]=dict(previous,source_ms=sample['source_ms'],received_ms=received_ms,identity=sample['id'])
                 counters['coalesced_unchanged_top_confirmations']+=1;continue
             result = store.apply(sample)

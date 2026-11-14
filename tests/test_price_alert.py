@@ -116,3 +116,74 @@ def test_cross_transaction_failure_preserves_unfired(cfg,market,make_raw):
         s.c.execute('DROP TRIGGER fail_price')
         send(s,market,make_raw('0.82',AT+1,bid='0.80'),AT+1)
         assert len(alerts(s))==1
+
+def test_6000_confirmations_and_duplicate_write_bound(cfg,market,make_raw):
+    from pathlib import Path
+    results=[]
+    for enabled in (False,True):
+        local=replace(cfg,data_dir=str(Path(cfg.data_dir)/str(enabled)),price_alert_enabled=enabled)
+        counts=Counter()
+        with Store(local)as s:
+            s.bind(market,{});s.connection_started(AT)
+            for i in range(6000):
+                r=make_raw('0.49',AT+i*100,bid='0.47')
+                process(json.dumps(r),AT+i*100,market,s,counts)
+            assert s.c.execute('select count(*) from samples').fetchone()[0]==40
+            assert counts['coalesced_unchanged_top_confirmations']==5960
+            assert not alerts(s)
+            for i in range(6000):process(json.dumps(r),AT+600000,market,s,counts)
+            assert counts['DUPLICATE']==6000
+            assert s.c.execute("select count(*) from diagnostics where category='DUPLICATE'").fetchone()[0]<=48
+            assert s.c.execute('pragma integrity_check').fetchone()[0]=='ok'
+        results.append(sum(p.stat().st_size for p in Path(local.data_dir).iterdir() if p.is_file()))
+    assert results[1]<=2*results[0]
+
+def test_bid_only_cross_after_checkpoint(cfg,market,make_raw):
+    with Store(replace(cfg,price_alert_enabled=True))as s:
+        s.bind(market,{});s.connection_started(AT)
+        for dt in (0,100,14999,15000):
+            send(s,market,make_raw('0.70',AT+dt,bid='0.28'),AT+dt)
+        assert s.c.execute('select count(*) from samples').fetchone()[0]==2
+        send(s,market,make_raw('0.70',AT+15001,bid='0.52'),AT+15001)
+        e=alerts(s)[0]
+        assert e['thresholds']==['0.50','0.55','0.60']
+        assert e['previous']['source_ms']==AT+15000
+        assert e['current']['ask']=='0.70' and e['current']['bid']=='0.52'
+
+def test_gap_between_checkpoints_preserves_highwater(cfg,market,make_raw):
+    with Store(replace(cfg,price_alert_enabled=True))as s:
+        s.bind(market,{});s.connection_started(AT)
+        send(s,market,make_raw('0.49',AT,bid='0.47'),AT)
+        send(s,market,make_raw('0.49',AT+1000,bid='0.47'),AT+1000)
+        s.gap('gap',AT+1001);s.connection_started(AT+1002)
+        send(s,market,make_raw('0.82',AT+500,bid='0.80'),AT+1003)
+        assert not alerts(s)
+        send(s,market,make_raw('0.82',AT+1004,bid='0.80'),AT+1004)
+        assert not alerts(s)
+
+def test_missing_ask_and_bid_restore_baseline(cfg,market,make_raw):
+    with Store(replace(cfg,price_alert_enabled=True))as s:
+        s.bind(market,{});s.connection_started(AT)
+        send(s,market,make_raw('0.49',AT,bid='0.47'),AT)
+        send(s,market,make_raw(None,AT+1,bid='0.47'),AT+1)
+        send(s,market,make_raw('0.82',AT+2,bid='0.80'),AT+2)
+        assert not alerts(s)
+        send(s,market,make_raw('0.82',AT+3,bid=None),AT+3)
+        send(s,market,make_raw('0.82',AT+4,bid='0.80'),AT+4)
+        assert not alerts(s)
+
+def test_restart_between_checkpoints_retains_fired(cfg,market,make_raw):
+    cfg=replace(cfg,price_alert_enabled=True)
+    with Store(cfg)as s:
+        s.bind(market,{});s.connection_started(AT)
+        send(s,market,make_raw('0.49',AT,bid='0.47'),AT)
+        send(s,market,make_raw('0.62',AT+1,bid='0.60'),AT+1)
+        send(s,market,make_raw('0.62',AT+100,bid='0.60'),AT+100)
+        assert len(alerts(s))==1
+    with Store(cfg)as s:
+        s.connection_started(AT+101)
+        send(s,market,make_raw('0.82',AT+102,bid='0.80'),AT+102)
+        assert len(alerts(s))==1
+        send(s,market,make_raw('0.49',AT+103,bid='0.47'),AT+103)
+        send(s,market,make_raw('0.82',AT+104,bid='0.80'),AT+104)
+        assert alerts(s)[-1]['thresholds']==['0.70','0.80']

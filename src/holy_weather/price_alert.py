@@ -55,6 +55,7 @@ def record(store,sample,status):
         store.price_alert_ready.add(token)
         reason='BASELINE' if baseline else 'CROSS' if levels else 'NO_NEW_THRESHOLD'
         if events:return events
+    if reason=='NO_NEW_THRESHOLD':return []
     store.c.execute('insert into diagnostics(received_ms,category,reason) values(?,?,?)',(sample['received_ms'],'PRICE_ALERT',reason+':'+token))
     store.c.execute('delete from diagnostics where id not in (select id from diagnostics order by id desc limit 512)')
     return []
