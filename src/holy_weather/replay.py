@@ -10,7 +10,7 @@ from .discovery import select
 from .storage import Store
 
 
-def replay(cfg, manifest_path):
+def replay(cfg, manifest_path, *, observer=None):
     manifest_path=Path(manifest_path);manifest=json.loads(manifest_path.read_text())
     bodies={}
     for key in ('gamma','stream'):
@@ -51,12 +51,14 @@ def replay(cfg, manifest_path):
                           'received_at':manifest['gamma']['received_at'],'raw_body':bodies['gamma'].decode()})
         for line in bodies['stream'].decode().splitlines():
             e=json.loads(line);received=int(receipt(e['received_at']).timestamp()*1000)
+            if observer is not None:observer(store,market,received)
             if e['kind']=='frame':process(json.dumps(e['data']),received,market,store,counters)
             elif e['kind']=='weather':
                 store.record_weather(e['receipt'],market,received)
             elif e['kind']=='lamp':
                 store.record_lamp(e['receipt'],market,received)
             elif e['kind']=='control'and e.get('event')in ('gap','error','disconnect'):store.gap('REPLAY_'+e['event'],received)
+        if observer is not None:observer(store,market,int(previous.timestamp()*1000)+1)
         result={'state':'REPLAY_COMPLETE','mode':'SAVED_REAL_OR_SYNTHETIC_AS_DECLARED_BY_MANIFEST',
                 'manifest_sha256':sha(manifest_path.read_bytes()),'counters':dict(counters),'storage':store.stats(now_ms=int(previous.timestamp()*1000))}
     # Reading artifacts never gives permission to update them.

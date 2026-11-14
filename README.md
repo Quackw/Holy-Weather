@@ -14,7 +14,7 @@ One project, two independent tracks, one shared Telegram bot:
 - **☀️ LAMP ALERT** — new original forecast issues, changes in the remaining-day
   peak and bucket-boundary crossings, compared with contemporaneous prices.
 
-These tracks are **planned, not implemented**. Shared data does not imply shared
+A first **offline New York preview** is available; complete strategy engines remain planned. See [NY research qualification](docs/NY_RESEARCH.md). Shared data does not imply shared
 signals, deduplication or a combined probability. See [STRATEGY.md](docs/STRATEGY.md)
 for evidence requirements and existing-versus-planned components, and
 [ROADMAP.md](docs/ROADMAP.md) for the one-city implementation sequence.

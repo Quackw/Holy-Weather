@@ -1,6 +1,6 @@
 # HOLY WEATHER development rules
 
-This private project is independent of POLYMETEO. PRs 1–4 are accepted. Approved concept: one project, two independent analytical tracks (LOCK ALERT and LAMP ALERT), one shared Telegram bot. See docs/STRATEGY.md. Current task is documentation only; no strategy implementation or deployment is authorized.
+This private project is independent of POLYMETEO. PRs 1–4 are accepted. Approved concept: one project, two independent analytical tracks (LOCK ALERT and LAMP ALERT), one shared Telegram bot. See docs/STRATEGY.md. Current scope: offline New York LOCK/LAMP previews on saved data in a separate PR. No Telegram sends, deployment or production changes.
 
 - Use codex/ branches and small reviewable PRs. No automatic merging.
 - No production deployment, new services, trading or own weather models. Original AWC/LAMP is forecast context, not a probability. Telegram work remains separately scoped in PR #5; do not activate or extend it under this documentation task. Never change POLYMETEO or share its working databases.
