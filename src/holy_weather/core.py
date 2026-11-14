@@ -59,8 +59,10 @@ class Config:
     max_reconnects: int = 3
     weather_context: bool = False
     lamp_context: bool = False
+    price_alert_enabled: bool = False
 
     def __post_init__(self):
+        if type(self.price_alert_enabled)is not bool:raise ValueError("PRICE_ALERT_BOOLEAN")
         if type(self.lamp_context)is not bool or (self.lamp_context and not self.weather_context):
             raise ValueError("LAMP_REQUIRES_WEATHER_CONTEXT")
         if type(self.weather_context) is not bool:
@@ -101,7 +103,7 @@ class Config:
         return self.date or now.astimezone(ZoneInfo(CITIES[self.city][2])).date().isoformat()
 
     def rule_hash(self):
-        return sha({k: v for k, v in asdict(self).items() if k not in ('data_dir', 'duration_seconds', 'max_reconnects', 'weather_context', 'lamp_context')})
+        return sha({k: v for k, v in asdict(self).items() if k not in ('data_dir', 'duration_seconds', 'max_reconnects', 'weather_context', 'lamp_context', 'price_alert_enabled')})
 
 
 def normalize(message, received_ms, market, *, change=None):

@@ -35,6 +35,7 @@ class Store:
         self.seen_tops={}
         self.connected=False
         self.ready_tokens=set()
+        self.price_alert_ready=set()
         self.pending_baselines={}
         self.root = Path(cfg.data_dir).absolute()
         if self.root.is_symlink():
@@ -154,6 +155,7 @@ class Store:
     def gap(self, reason, at):
         self.connected=False
         self.ready_tokens.clear()
+        self.price_alert_ready.clear()
         self.pending_baselines.clear()
         previous_tops=dict(self.seen_tops)
         self.seen_tops.clear()
@@ -181,6 +183,7 @@ class Store:
                            (at,'GAP',('DATA:'+reason+(':'+token if token else ':ALL'))[:300]))
             self.c.execute('delete from diagnostics where id not in (select id from diagnostics order by id desc limit 512)')
         for target in targets:
+            self.price_alert_ready.discard(target)
             self.ready_tokens.discard(target);self.seen_tops.pop(target,None)
             if self.connected:self.pending_baselines.setdefault(target,time.monotonic())
 
@@ -243,6 +246,9 @@ class Store:
                         self.c.execute('insert or ignore into event_inputs values(?,?)',(ident,price['input_id']))
                 discovery=self.c.execute("select input_id from latest where kind='discovery'").fetchone()
                 if discovery:self.c.execute('insert or ignore into event_inputs values(?,?)',(ident,discovery[0]))
+            if self.cfg.price_alert_enabled:
+                from .price_alert import record
+                events += record(self,sample,status)
             result={'status': status, 'events': events,'raw_bytes':len(raw),'compressed_bytes':len(compressed)}
         # Readiness changes only after the input/state transaction commits.
         if quote:
@@ -380,7 +386,7 @@ class Store:
     def observation_snapshot(self, *, now_ms=None):
         # Periodic health checks read only latest rows, not the entire history.
         now_ms=int(time.time()*1000) if now_ms is None else now_ms
-        result={'latest': [dict(r) for r in self.c.execute('select s.* from latest l join samples s on s.input_id=l.input_id order by s.token,s.kind')]}
+        result={'latest': [dict(r) for r in self.c.execute("select s.* from latest l join samples s on s.input_id=l.input_id where l.kind!='price_alert' order by s.token,s.kind")]}
         for row in result['latest']:
             row['age_now_ms']=now_ms-row['source_ms']
             row['receipt_age_now_ms']=now_ms-row['received_ms']
