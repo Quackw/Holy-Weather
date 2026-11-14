@@ -197,3 +197,14 @@ Select the exact currently offered bucket for each run; an absent bucket is an
 explicit refusal. Historical snapshots are never rebound to another city/day.
 
 See `docs/TEN_CITY_QUALIFICATION.md` for the station matrix and real qualification.
+
+## Stream recovery
+
+Exact known duplicates are diagnosed without resetting valid quotes. Unknown
+reverse-clock updates invalidate the affected side's baseline, not the fact that
+the socket is open. A full fresh quote restores that side without crossing the
+pre-gap price. If a baseline is absent for five seconds, the existing bounded
+reconnect budget applies; exhaustion exits explicitly. This deadline does not
+change the 90-second quote freshness limit. See
+`docs/STREAM_RECOVERY_20261114.md` for failure tests and the 13 recorded incidents.
+Future stages are planning only in `docs/ROADMAP.md`.

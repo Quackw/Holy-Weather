@@ -16,6 +16,13 @@ from .core import Config, normalize, sha
 from .discovery import discover
 from .storage import Store, StorageStop
 
+BASELINE_RECOVERY_SECONDS=5
+
+
+class BaselineRecoveryTimeout(TimeoutError):
+    pass
+
+
 WS = 'wss://ws-subscriptions-clob.polymarket.com/ws/market'
 
 
@@ -39,7 +46,7 @@ def process(raw, received_ms, market, store, counters):
     try:
         parsed = json.loads(raw)
     except ValueError:
-        store.gap('MALFORMED_JSON_FRAME',received_ms); counters['invalid_frames']+=1; return
+        store.invalidate('MALFORMED_JSON_FRAME',received_ms); counters['invalid_frames']+=1; return
     expanded=[]
     for message in parsed if isinstance(parsed,list)else[parsed]:
         if isinstance(message,dict)and message.get('event_type')=='price_change':
@@ -48,16 +55,20 @@ def process(raw, received_ms, market, store, counters):
             expanded.extend((message,c)for c in changes if isinstance(c,dict)and str(c.get('asset_id'))in market['tokens'].values())
         else:expanded.append((message,None))
     for message,change in expanded:
+        sample=None
         try:
             sample = normalize(message,received_ms,market,change=change)
             if sample is None:
                 counters['ignored_depth_or_control']+=1;continue
+            if store.known_duplicate(sample):
+                store.diagnostic('DUPLICATE','EXACT_PREVIOUSLY_SEEN_SAMPLE',received_ms)
+                counters['DUPLICATE']+=1;continue
             quote=sample['kind']not in ('last_trade_price','market_resolved')
             previous=store.seen_tops.get(sample.get('token')) if quote else None
             if previous and sample['source_ms']<previous['source_ms']:
-                store.reject(message,'OUT_OF_ORDER_CONFIRMATION',received_ms);counters['OUT_OF_ORDER']+=1;continue
+                store.reject(message,'OUT_OF_ORDER_CONFIRMATION',received_ms,sample['token']);counters['OUT_OF_ORDER']+=1;continue
             if previous and received_ms<previous.get('received_ms',previous['persisted_ms']):
-                store.reject(message,'RECEIPT_CLOCK_REVERSED',received_ms);counters['RECEIPT_CLOCK_REVERSED']+=1;continue
+                store.reject(message,'RECEIPT_CLOCK_REVERSED',received_ms,sample['token']);counters['RECEIPT_CLOCK_REVERSED']+=1;continue
             if quote and previous and (sample['kind']!='best_bid_ask' or sample['token'] in store.ready_tokens) and sample['id']!=previous['identity']and sample['kind']in ('price_change','best_bid_ask')and(sample['bid'],sample['ask'])==previous['top']and 0<=received_ms-sample['source_ms']<=store.cfg.quote_age_seconds*1000 and 0<=received_ms-previous['persisted_ms']<15000:
                 store.seen_tops[sample['token']]=dict(previous,source_ms=sample['source_ms'],received_ms=received_ms,identity=sample['id'])
                 counters['coalesced_unchanged_top_confirmations']+=1;continue
@@ -73,7 +84,7 @@ def process(raw, received_ms, market, store, counters):
                 counters[event['status']] += 1
         except (ValueError,KeyError,TypeError) as exc:
             counters['invalid_messages']+=1
-            store.reject(message,str(exc),received_ms)
+            store.reject(message,str(exc),received_ms,sample.get('token') if sample else None)
             if counters['invalid_messages']>=20:
                 raise ValueError('INVALID_INPUT_BUDGET_EXHAUSTED')
 
@@ -113,6 +124,8 @@ def observe(cfg, *, connect=None, stop=None, weather_fetch=None, lamp_fetch=None
                                 reason='MARKET_LOCAL_DATE_ENDED';stop.set();break
                             if weather:weather.tick(store,market,millis())
                             if lamp:lamp.tick(store,market,millis())
+                            if store.recovery_due(BASELINE_RECOVERY_SECONDS):
+                                raise BaselineRecoveryTimeout('BASELINE_NOT_CONFIRMED')
                             if time.monotonic()>=next_stats:
                                 health=store.observation_snapshot()['observation']['state']
                                 store.set_meta('counters',dict(counters));logger.info(json.dumps({'state':health,'counters':dict(counters)}));next_stats=time.monotonic()+10
@@ -127,7 +140,7 @@ def observe(cfg, *, connect=None, stop=None, weather_fetch=None, lamp_fetch=None
                             if raw=='PONG':
                                 last_pong=time.monotonic();continue
                             if not isinstance(raw,str):
-                                store.gap('UNEXPECTED_BINARY_FRAME',millis());counters['invalid_frames']+=1;continue
+                                store.invalidate('UNEXPECTED_BINARY_FRAME',millis());counters['invalid_frames']+=1;continue
                             process(raw,millis(),market,store,counters)
                             if store.c.execute("select 1 from meta where key='market_closed'").fetchone():
                                 reason='MARKET_RESOLVED';stop.set()
@@ -140,11 +153,13 @@ def observe(cfg, *, connect=None, stop=None, weather_fetch=None, lamp_fetch=None
                         reason='ACCESS_DENIED_NO_RETRY';exit_code=2;break
                     reason='WEBSOCKET_HTTP_ERROR';exit_code=5;break
                 except (OSError,TimeoutError,ConnectionClosed) as exc:
-                    store.gap('NETWORK:'+type(exc).__name__,millis());counters['network_gaps']+=1
+                    recovery=isinstance(exc,BaselineRecoveryTimeout)
+                    store.gap('BASELINE_RECOVERY_RECONNECT' if recovery else 'NETWORK:'+type(exc).__name__,millis())
+                    counters['baseline_recovery_gaps' if recovery else 'network_gaps']+=1
                     if isinstance(exc,ConnectionClosed) and exc.rcvd and exc.rcvd.code in (1007,1009):
                         reason='INVALID_OR_OVERSIZE_STREAM';exit_code=3;break
                     if attempt>=cfg.max_reconnects:
-                        reason='NETWORK_RECONNECT_BUDGET_EXHAUSTED';exit_code=5;break
+                        reason='BASELINE_RECOVERY_BUDGET_EXHAUSTED' if recovery else 'NETWORK_RECONNECT_BUDGET_EXHAUSTED';exit_code=5;break
                     attempt+=1;counters['reconnects']+=1;stop.wait(min(2**(attempt-1),max(0,deadline-time.monotonic())))
                 except WebSocketException as exc:
                     store.gap('PROTOCOL:'+type(exc).__name__,millis());reason='WEBSOCKET_PROTOCOL_ERROR';exit_code=3;break
