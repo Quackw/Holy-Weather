@@ -16,7 +16,7 @@ reasons in its own SQLite. No account or trading credentials are needed.
 - **☀️ LAMP ALERT** — independently triggered by original forecast revisions:
   verified bucket-boundary crossings or a significant remaining-peak change.
 
-These notification algorithms are planned. Existing 50/70/90 ask research events
+The opt-in PRICE algorithm is implemented; see [PRICE_ALERT.md](docs/PRICE_ALERT.md). LAMP notifications remain planned. Existing 50/70/90 ask research events
 remain unchanged and are **not** the Netflix algorithm. No winner/lock strategy
 is part of the product. See [STRATEGY.md](docs/STRATEGY.md) and
 [ROADMAP.md](docs/ROADMAP.md) for implementation and acceptance gates.

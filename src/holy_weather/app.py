@@ -69,7 +69,7 @@ def process(raw, received_ms, market, store, counters):
                 store.reject(message,'OUT_OF_ORDER_CONFIRMATION',received_ms,sample['token']);counters['OUT_OF_ORDER']+=1;continue
             if previous and received_ms<previous.get('received_ms',previous['persisted_ms']):
                 store.reject(message,'RECEIPT_CLOCK_REVERSED',received_ms,sample['token']);counters['RECEIPT_CLOCK_REVERSED']+=1;continue
-            if quote and previous and (sample['kind']!='best_bid_ask' or sample['token'] in store.ready_tokens) and sample['id']!=previous['identity']and sample['kind']in ('price_change','best_bid_ask')and(sample['bid'],sample['ask'])==previous['top']and 0<=received_ms-sample['source_ms']<=store.cfg.quote_age_seconds*1000 and 0<=received_ms-previous['persisted_ms']<15000:
+            if not store.cfg.price_alert_enabled and quote and previous and (sample['kind']!='best_bid_ask' or sample['token'] in store.ready_tokens) and sample['id']!=previous['identity']and sample['kind']in ('price_change','best_bid_ask')and(sample['bid'],sample['ask'])==previous['top']and 0<=received_ms-sample['source_ms']<=store.cfg.quote_age_seconds*1000 and 0<=received_ms-previous['persisted_ms']<15000:
                 store.seen_tops[sample['token']]=dict(previous,source_ms=sample['source_ms'],received_ms=received_ms,identity=sample['id'])
                 counters['coalesced_unchanged_top_confirmations']+=1;continue
             result = store.apply(sample)

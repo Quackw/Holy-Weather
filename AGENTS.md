@@ -1,6 +1,6 @@
 # HOLY WEATHER development rules
 
-This private project is independent of POLYMETEO. Accepted runtime PRs 1–4 remain intact. The current product is exactly two independent notification algorithms: PRICE ALERT and LAMP ALERT, sharing inputs and one Telegram bot. See docs/STRATEGY.md. Current task is PR A documentation only; implement PR B only after PR A acceptance.
+This private project is independent of POLYMETEO. Accepted runtime PRs 1–4 remain intact. The current product is exactly two independent notification algorithms: PRICE ALERT and LAMP ALERT, sharing inputs and one Telegram bot. See docs/STRATEGY.md. PR A (#8) is accepted. Current task is PR B: opt-in PRICE ALERT with persistence and regression tests; no sends or production changes.
 
 - Use codex/ branches and small reviewable PRs. No automatic merges or deployments.
 - No winner/lock strategy, own weather models, probabilities, trading, new services or production changes. Never change POLYMETEO or share its working databases.
