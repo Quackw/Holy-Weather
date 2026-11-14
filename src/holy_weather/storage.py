@@ -270,7 +270,10 @@ class Store:
     def record_lamp(self,receipt,market,available_ms):
         from .lamp import update
         if not self.cfg.lamp_context:raise ValueError('LAMP_NOT_ENABLED')
-        state=update(self.lamp_state(),receipt,market,available_ms)
+        previous_lamp=self.lamp_state()
+        if self.cfg.lamp_alert_enabled and available_ms<previous_lamp.get("poll_available_ms",-1):
+            raise ValueError("LAMP_ALERT_CLOCK_REVERSED")
+        state=update(previous_lamp,receipt,market,available_ms)
         raw=canonical(dict(receipt=receipt,available_ms=available_ms,status=state['status'],duplicate=state['duplicate'])).encode()
         compressed=zlib.compress(raw,3)
         with self.transaction():
@@ -289,6 +292,9 @@ class Store:
             for label,ref in (('__LAMP__',state['input_id']),('__LAMP_POLL__',ident)):
                 self.c.execute('insert into latest values(?,?,?)',(label,'lamp',ref))
             self.c.execute("insert or replace into meta values('lamp_context_v1',?)",(canonical(state),))
+            if self.cfg.lamp_alert_enabled:
+                from .lamp_alert import record
+                record(self,market,state,available_ms)
 
     def price_context(self,at_ms):
         bound=self.c.execute('select payload from market where id=1').fetchone()
