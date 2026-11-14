@@ -61,3 +61,10 @@ PRICE/LAMP event was fabricated or attributed to a live market.
 
 Next: review PR D and approve exact test preview(s) before any outbound action.
 No automatic merge or deployment.
+
+## Finite live observation
+
+One explicitly approved 120-second Linux run completed with Telegram disabled.
+See [LIVE_QUEUE_20261114.md](LIVE_QUEUE_20261114.md): AWC/LAMP and initial quotes
+were received; quotes aged out and no genuine PRICE/LAMP event formed. This is
+not proof of live delivery or continuously fresh market data.
