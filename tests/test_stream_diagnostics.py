@@ -68,3 +68,20 @@ def test_ignored_types_use_bounded_counter_names(cfg,market):
                                'ignored_unknown_type','ignored_tick_size_change'}
         assert counters['ignored_unknown_type']==100
         assert store.c.total_changes==before
+
+
+def test_gamma_indicative_prices_cannot_fill_missing_websocket_quotes(cfg,gamma,make_raw):
+    from holy_weather.discovery import select
+    from conftest import NOW
+    gamma[0]['markets'][0].update(bestBid=0.85,bestAsk=0.94,outcomePrices='["0.895","0.105"]')
+    market=select(gamma,cfg,now=NOW);counters=Counter()
+    with Store(replace(cfg,price_alert_enabled=True,alert_queue_enabled=True)) as store:
+        store.bind(market,{'synthetic':True,'raw_document':gamma});store.connection_started(AT)
+        send(store,market,counters,make_raw('0.01',AT,bid=None,kind='book'),AT)
+        send(store,market,counters,make_raw(None,AT,bid='0.99',token=market['tokens']['NO'],kind='book'),AT)
+        prices=store.price_context(AT+1)
+        assert prices['YES']['bid'] is None and prices['YES']['ask']=='0.01'
+        assert prices['NO']['bid']=='0.99' and prices['NO']['ask'] is None
+        assert store.observation_snapshot(now_ms=AT+1)['observation']['state']=='PARTIAL_OR_UNUSABLE'
+        assert not store.c.execute("select 1 from events where type='PRICE_ALERT'").fetchone()
+        assert not store.c.execute("select 1 from meta where key like 'alert_delivery_v1:%'").fetchone()
