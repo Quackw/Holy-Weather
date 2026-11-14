@@ -1,0 +1,244 @@
+"""One owner, transactional inputs/decisions/state, bounded private SQLite."""
+from contextlib import contextmanager
+import fcntl
+import json
+import os
+from pathlib import Path
+import sqlite3
+import time
+import zlib
+from .core import canonical, evolve, reset, sha
+
+APP_ID = 0x48574D31
+SCHEMA = '''
+CREATE TABLE market(id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL, receipt TEXT NOT NULL);
+CREATE TABLE inputs(id INTEGER PRIMARY KEY, identity TEXT NOT NULL UNIQUE, received_ms INTEGER NOT NULL, raw BLOB NOT NULL, raw_sha TEXT NOT NULL);
+CREATE TABLE samples(input_id INTEGER PRIMARY KEY REFERENCES inputs(id), token TEXT NOT NULL, kind TEXT NOT NULL, source_ms INTEGER NOT NULL, received_ms INTEGER NOT NULL, bid TEXT, ask TEXT, bid_size TEXT, ask_size TEXT, trade TEXT, trade_size TEXT, snapshot_trade TEXT, status TEXT NOT NULL);
+CREATE TABLE state(token TEXT PRIMARY KEY, payload TEXT NOT NULL);
+CREATE TABLE latest(token TEXT NOT NULL, kind TEXT NOT NULL, input_id INTEGER NOT NULL REFERENCES inputs(id), PRIMARY KEY(token,kind));
+CREATE TABLE events(id TEXT PRIMARY KEY, input_id INTEGER NOT NULL REFERENCES inputs(id), token TEXT NOT NULL, received_ms INTEGER NOT NULL, type TEXT NOT NULL, status TEXT NOT NULL, reason TEXT, payload TEXT NOT NULL);
+CREATE TABLE event_inputs(event_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE, input_id INTEGER NOT NULL REFERENCES inputs(id), PRIMARY KEY(event_id,input_id));
+CREATE TABLE diagnostics(id INTEGER PRIMARY KEY, received_ms INTEGER NOT NULL, category TEXT NOT NULL, reason TEXT NOT NULL);
+CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE INDEX input_time ON inputs(received_ms);
+CREATE INDEX event_time ON events(received_ms);
+'''
+
+
+class StorageStop(RuntimeError):
+    pass
+
+
+class Store:
+    def __init__(self, cfg, *, session=True):
+        self.cfg, self.closed = cfg, False
+        self.seen_tops={}
+        self.root = Path(cfg.data_dir).absolute()
+        if self.root.is_symlink():
+            raise StorageStop('SYMLINK_DATA_DIRECTORY')
+        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        marker = self.root / '.holy-weather-owned'
+        if not marker.exists():
+            if any(self.root.iterdir()):
+                raise StorageStop('NONEMPTY_UNOWNED_DIRECTORY')
+            marker.write_text('HOLY_WEATHER_STAGE1\n')
+        if marker.is_symlink() or marker.read_text() != 'HOLY_WEATHER_STAGE1\n':
+            raise StorageStop('OWNERSHIP_MARKER')
+        if (self.root/'.writer.lock').is_symlink():
+            raise StorageStop('SYMLINK_WRITER_LOCK')
+        self.lock = (self.root / '.writer.lock').open('a')
+        try:
+            fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            self.lock.close(); raise StorageStop('WRITER_ALREADY_RUNNING')
+        self.db_path = self.root/'monitor.sqlite3'
+        self.reserve = min(8*1024*1024, cfg.storage_bytes//2)
+        try:
+            self._guard()
+        except Exception:
+            self.lock.close();raise
+        new = not self.db_path.exists()
+        if self.db_path.is_symlink():
+            raise StorageStop('SYMLINK_DATABASE')
+        self.c = sqlite3.connect(self.db_path, timeout=1, isolation_level=None)
+        self.c.row_factory = sqlite3.Row
+        try:
+            if not new:
+                app_id=self.c.execute('pragma application_id').fetchone()[0]
+                version=self.c.execute('pragma user_version').fetchone()[0]
+                empty=not self.c.execute("select name from sqlite_master where name not like 'sqlite_%'").fetchall()
+                if app_id==0 and version==0 and empty:
+                    new=True  # proven empty, owned bootstrap interrupted before commit
+                elif app_id!=APP_ID:
+                    raise StorageStop('FOREIGN_DATABASE')
+                elif version!=1:
+                    raise StorageStop('UNKNOWN_SCHEMA')
+            if self.c.execute('pragma quick_check').fetchone()[0]!='ok':
+                raise StorageStop('SQLITE_INTEGRITY_CHECK_FAILED')
+            self.c.execute('pragma foreign_keys=ON')
+            self.c.execute('pragma journal_mode=WAL')
+            self.c.execute('pragma synchronous=FULL')
+            self.c.execute('pragma temp_store=MEMORY')
+            self.c.execute('pragma cache_size=-4096')
+            self.c.execute('pragma wal_autocheckpoint=128')
+            self.c.execute('pragma journal_size_limit=1048576')
+            pages = (cfg.storage_bytes-self.reserve)//self.c.execute('pragma page_size').fetchone()[0]
+            self.c.execute(f'pragma max_page_count={pages}')
+            if new:
+                self.c.executescript('BEGIN;'+SCHEMA+f'PRAGMA application_id={APP_ID};PRAGMA user_version=1;COMMIT;')
+            if self.c.execute('pragma user_version').fetchone()[0] != 1:
+                raise StorageStop('UNKNOWN_SCHEMA')
+            current = self.c.execute("select value from meta where key='rule_hash'").fetchone()
+            if current and current[0] != cfg.rule_hash():
+                raise StorageStop('CONFIG_RULE_DRIFT_USE_NEW_DATA_DIRECTORY')
+            self.c.execute("insert or ignore into meta values('rule_hash',?)", (cfg.rule_hash(),))
+            if session:
+                self.gap('PROCESS_START_OR_RESTART', int(time.time()*1000))
+        except Exception:
+            self.c.close(); self.lock.close(); raise
+
+    def usage(self):
+        paths = list(self.root.iterdir())
+        if len(paths) > 32 or any(p.is_symlink() or not p.is_file() for p in paths):
+            raise StorageStop('UNEXPECTED_DATA_DIRECTORY_CONTENT')
+        return sum(p.stat().st_size for p in paths)
+
+    def _guard(self):
+        if self.usage() >= self.cfg.storage_bytes-self.reserve:
+            raise StorageStop('STORAGE_BUDGET_CAPTURE_STOPPED')
+
+    @contextmanager
+    def transaction(self):
+        self._guard(); self.c.execute('begin immediate')
+        try:
+            yield
+            self.c.execute('commit')
+        except Exception:
+            if self.c.in_transaction:
+                self.c.execute('rollback')
+            raise
+        wal = self.root/'monitor.sqlite3-wal'
+        if wal.exists() and wal.stat().st_size > 1024*1024:
+            self.c.execute('pragma wal_checkpoint(truncate)')
+
+    def bind(self, market, receipt):
+        with self.transaction():
+            prior = self.c.execute('select payload from market where id=1').fetchone()
+            # Metadata receipt times may refresh. Contract identity/rules cannot.
+            if prior and json.loads(prior[0]) != market:
+                raise StorageStop('MARKET_IDENTITY_OR_RULE_DRIFT')
+            summary={k:v for k,v in receipt.items()if k!='raw_body'}
+            self.c.execute('insert or replace into market values(1,?,?)', (canonical(market), canonical(summary)))
+            raw=canonical(receipt).encode();identity='GAMMA:'+sha(raw)
+            at=int(__import__('datetime').datetime.fromisoformat(receipt['received_at'].replace('Z','+00:00')).timestamp()*1000) if receipt.get('received_at') else int(time.time()*1000)
+            self.c.execute('insert or ignore into inputs(identity,received_ms,raw,raw_sha)values(?,?,?,?)',
+                           (identity,at,zlib.compress(raw,3),sha(raw)))
+            ident=self.c.execute('select id from inputs where identity=?',(identity,)).fetchone()[0]
+            self.c.execute('insert or replace into latest values(?,?,?)',('__MARKET__','discovery',ident))
+
+    def diagnostic(self, category, reason, at):
+        with self.transaction():
+            self.c.execute('insert into diagnostics(received_ms,category,reason) values(?,?,?)', (at, category, reason[:300]))
+            self.c.execute('delete from diagnostics where id not in (select id from diagnostics order by id desc limit 512)')
+
+    def gap(self, reason, at):
+        self.seen_tops.clear()
+        with self.transaction():
+            for row in self.c.execute('select token,payload from state').fetchall():
+                self.c.execute('update state set payload=? where token=?', (canonical(reset(json.loads(row['payload']))), row['token']))
+            self.c.execute('insert into diagnostics(received_ms,category,reason) values(?,?,?)', (at, 'GAP', reason[:300]))
+            self.c.execute('delete from diagnostics where id not in (select id from diagnostics order by id desc limit 512)')
+
+    def apply(self, sample):
+        raw = canonical(sample['raw']).encode()
+        if len(raw) > 262144:
+            raise ValueError('INPUT_BOUND')
+        with self.transaction():
+            prior = self.c.execute('select id from inputs where identity=?', (sample['id'],)).fetchone()
+            if prior:
+                return {'status': 'DUPLICATE', 'events': [], 'raw_bytes':0,'compressed_bytes':0}
+            compressed=zlib.compress(raw,3)
+            cur = self.c.execute('insert into inputs(identity,received_ms,raw,raw_sha) values(?,?,?,?)',
+                                 (sample['id'], sample['received_ms'], compressed, sha(raw)))
+            input_id = cur.lastrowid
+            if sample['kind'] == 'market_resolved':
+                self.c.execute("insert or replace into meta values('market_closed','true')")
+                return {'status': 'MARKET_RESOLVED', 'events': []}
+            if self.c.execute("select 1 from meta where key='market_closed'").fetchone():
+                return {'status': 'AFTER_RESOLUTION', 'events': []}
+            sample = dict(sample, input_id=input_id)
+            row = self.c.execute('select payload from state where token=?', (sample['token'],)).fetchone()
+            previous = json.loads(row[0]) if row else None
+            state, events, status = evolve(previous, sample, self.cfg)
+            self.c.execute('insert or replace into state values(?,?)', (sample['token'], canonical(state)))
+            keys = ('token','kind','source_ms','received_ms','bid','ask','bid_size','ask_size','trade','trade_size','snapshot_trade')
+            self.c.execute('insert into samples values(?,?,?,?,?,?,?,?,?,?,?,?,?)', (input_id, *(sample[k] for k in keys), status))
+            category = 'trade' if sample['kind']=='last_trade_price' else 'quote'
+            self.c.execute('insert or replace into latest values(?,?,?)', (sample['token'], category, input_id))
+            for event in events:
+                ident = sha([sample['id'], self.cfg.rule_hash(), event['type'], event.get('level'), event.get('direction'), event['status']])
+                self.c.execute('insert into events values(?,?,?,?,?,?,?,?)', (ident, input_id, sample['token'], sample['received_ms'], event['type'], event['status'], event.get('reason'), canonical(event)))
+                for ref in {p['input_id'] for p in event['evidence']}:
+                    self.c.execute('insert into event_inputs values(?,?)', (ident, ref))
+                discovery=self.c.execute("select input_id from latest where kind='discovery'").fetchone()
+                if discovery:self.c.execute('insert or ignore into event_inputs values(?,?)',(ident,discovery[0]))
+            return {'status': status, 'events': events,'raw_bytes':len(raw),'compressed_bytes':len(compressed)}
+
+    def set_meta(self, key, value):
+        with self.transaction():
+            self.c.execute('insert or replace into meta values(?,?)', (key, canonical(value)))
+
+    def reject(self, raw, reason, at):
+        value=canonical(raw).encode()
+        if len(value)>262144:
+            value=canonical({'rejected_sha256':sha(value),'reason':'REJECTED_INPUT_TOO_LARGE'}).encode()
+        with self.transaction():
+            self.c.execute('insert or ignore into inputs(identity,received_ms,raw,raw_sha) values(?,?,?,?)',
+                           (sha(value),at,zlib.compress(value,3),sha(value)))
+        self.gap('INVALID_INPUT:'+reason,at)
+
+    def stats(self):
+        result = {'inputs': self.c.execute('select count(*) from inputs').fetchone()[0],
+                'samples': self.c.execute('select count(*) from samples').fetchone()[0],
+                'events': {r[0]: r[1] for r in self.c.execute('select status,count(*) from events group by status')},
+                'sample_states': {r[0]: r[1] for r in self.c.execute('select status,count(*) from samples group by status')},
+                'data_bytes': self.usage(), 'budget_bytes': self.cfg.storage_bytes,
+                'sqlite_integrity': self.c.execute('pragma quick_check').fetchone()[0],
+                'foreign_key_errors': len(self.c.execute('pragma foreign_key_check').fetchall()),
+                'compressed_input_bytes':self.c.execute('select coalesce(sum(length(raw)),0) from inputs').fetchone()[0],
+                'latest': [dict(r) for r in self.c.execute('select s.* from latest l join samples s on s.input_id=l.input_id order by s.token,s.kind')]}
+        for row in result['latest']:
+            row['age_now_ms']=int(time.time()*1000)-row['source_ms']
+            row['freshness_now']='CLOCK_UNVERIFIED' if row['age_now_ms']<0 else 'STALE' if row['age_now_ms']>self.cfg.quote_age_seconds*1000 else 'FRESH'
+        return result
+
+    def prune(self, now_ms, *, apply=False):
+        """Own data only. Events retain 30d; unreferenced input retains 24h.
+
+        Referenced evidence and latest token snapshots are never deleted.
+        Freed SQLite pages are reused; this does not promise physical shrinking.
+        """
+        cutoff = now_ms-24*3600*1000
+        query = '''select id from inputs where received_ms<? and id not in
+                   (select input_id from event_inputs union select input_id from events union select input_id from latest)'''
+        candidates = [r[0] for r in self.c.execute(query, (cutoff,))]
+        if apply:
+            with self.transaction():
+                # Clear expired comparison windows before explicit maintenance.
+                for row in self.c.execute('select token,payload from state').fetchall():
+                    self.c.execute('update state set payload=? where token=?', (canonical(reset(json.loads(row['payload']))), row['token']))
+                self.c.execute('delete from events where received_ms<?', (now_ms-30*24*3600*1000,))
+                self.c.execute('delete from samples where input_id in ('+query+')', (cutoff,))
+                self.c.execute('delete from inputs where id in ('+query+')', (cutoff,))
+        return {'eligible_unreferenced_inputs': len(candidates), 'applied': apply}
+
+    def close(self):
+        if not self.closed:
+            self.c.execute('pragma wal_checkpoint(truncate)')
+            self.c.close(); self.lock.close(); self.closed = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
