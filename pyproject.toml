@@ -14,6 +14,7 @@ test = ["pytest==9.2.0"]
 
 [project.scripts]
 holy-weather = "holy_weather.app:main"
+holy-weather-telegram = "holy_weather.telegram:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -208,3 +208,11 @@ reconnect budget applies; exhaustion exits explicitly. This deadline does not
 change the 90-second quote freshness limit. See
 `docs/STREAM_RECOVERY_20261114.md` for failure tests and the 13 recorded incidents.
 Future stages are planning only in `docs/ROADMAP.md`.
+
+## Optional Telegram adapter
+
+Disabled by default. English event cards and a single reviewed test-send command
+are documented in `docs/TELEGRAM.md`. No channel messages or production activation
+are authorized merely by installing this code. Delivery claims use the existing
+SQLite owner and persist across restart; uncertain requests are never retried
+automatically. A token must be configured outside Git and logs.

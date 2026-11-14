@@ -89,13 +89,16 @@ def process(raw, received_ms, market, store, counters):
                 raise ValueError('INVALID_INPUT_BUDGET_EXHAUSTED')
 
 
-def observe(cfg, *, connect=None, stop=None, weather_fetch=None, lamp_fetch=None):
+def observe(cfg, *, connect=None, stop=None, weather_fetch=None, lamp_fetch=None, telegram_transport=None):
     if connect is None:
         from websockets.sync.client import connect
     from websockets.exceptions import ConnectionClosed, InvalidStatus, WebSocketException
     stop = stop or threading.Event(); counters=Counter(); reason='COMPLETED_WINDOW'; exit_code=0
     deadline=time.monotonic()+cfg.duration_seconds
-    weather=None;lamp=None
+    weather=None;lamp=None;sender=None
+    if cfg.telegram_enabled:
+        from .telegram import Sender,post,token_from_env
+        sender=Sender(token_from_env(),transport=telegram_transport or post)
     with Store(cfg) as store:
         logger=logging.getLogger('holy_weather');logger.setLevel(logging.INFO);logger.propagate=False
         handler=RotatingFileHandler(store.root/'monitor.log',maxBytes=524288,backupCount=2)
@@ -124,6 +127,7 @@ def observe(cfg, *, connect=None, stop=None, weather_fetch=None, lamp_fetch=None
                                 reason='MARKET_LOCAL_DATE_ENDED';stop.set();break
                             if weather:weather.tick(store,market,millis())
                             if lamp:lamp.tick(store,market,millis())
+                            if sender:sender.tick(store,millis())
                             if store.recovery_due(BASELINE_RECOVERY_SECONDS):
                                 raise BaselineRecoveryTimeout('BASELINE_NOT_CONFIRMED')
                             if time.monotonic()>=next_stats:
@@ -163,6 +167,7 @@ def observe(cfg, *, connect=None, stop=None, weather_fetch=None, lamp_fetch=None
                     attempt+=1;counters['reconnects']+=1;stop.wait(min(2**(attempt-1),max(0,deadline-time.monotonic())))
                 except WebSocketException as exc:
                     store.gap('PROTOCOL:'+type(exc).__name__,millis());reason='WEBSOCKET_PROTOCOL_ERROR';exit_code=3;break
+            if sender:sender.close(store)
             elapsed=time.monotonic()-started
             if stop.is_set() and reason=='COMPLETED_WINDOW':
                 reason='SIGNAL_STOP'
@@ -171,6 +176,7 @@ def observe(cfg, *, connect=None, stop=None, weather_fetch=None, lamp_fetch=None
             result={'state':reason,'exit_code':exit_code,'elapsed_seconds':elapsed,'market':{k:v for k,v in market.items() if k!='rules'},
                     'counters':dict(counters),'storage':store.stats(),'growth_since_discovery_bytes':max(0,store.usage()-initial_bytes),
                     'process_disk_write_bytes':written-initial_writes if written is not None and initial_writes is not None else None,
+                    'telegram_status':sender.status if sender else 'DISABLED',
                     'weather_context_enabled':cfg.weather_context, 'lamp_context_enabled':cfg.lamp_context, 'own_model_or_trading_implemented':False}
             result['data_state']=result['storage']['observation']['state']
             if result['storage']['sqlite_integrity']!='ok' or result['storage']['foreign_key_errors']:
@@ -182,6 +188,7 @@ def observe(cfg, *, connect=None, stop=None, weather_fetch=None, lamp_fetch=None
         finally:
             if weather:weather.close()
             if lamp:lamp.close()
+            if sender:sender.close()
             handler.close();logger.removeHandler(handler)
 
 
