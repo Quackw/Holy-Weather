@@ -214,8 +214,14 @@ class Store:
                 'data_bytes': self.usage(), 'budget_bytes': self.cfg.storage_bytes,
                 'sqlite_integrity': self.c.execute('pragma quick_check').fetchone()[0],
                 'foreign_key_errors': len(self.c.execute('pragma foreign_key_check').fetchall()),
-                'compressed_input_bytes':self.c.execute('select coalesce(sum(length(raw)),0) from inputs').fetchone()[0],
-                'latest': [dict(r) for r in self.c.execute('select s.* from latest l join samples s on s.input_id=l.input_id order by s.token,s.kind')]}
+                'compressed_input_bytes':self.c.execute('select coalesce(sum(length(raw)),0) from inputs').fetchone()[0]}
+        result.update(self.observation_snapshot(now_ms=now_ms))
+        return result
+
+    def observation_snapshot(self, *, now_ms=None):
+        # Periodic health checks read only latest rows, not the entire history.
+        now_ms=int(time.time()*1000) if now_ms is None else now_ms
+        result={'latest': [dict(r) for r in self.c.execute('select s.* from latest l join samples s on s.input_id=l.input_id order by s.token,s.kind')]}
         for row in result['latest']:
             row['age_now_ms']=now_ms-row['source_ms']
             row['receipt_age_now_ms']=now_ms-row['received_ms']

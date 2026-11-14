@@ -107,7 +107,7 @@ def observe(cfg, *, connect=None, stop=None):
                             if datetime.now(timezone.utc).astimezone(ZoneInfo(market['timezone'])).date().isoformat()!=market['date']:
                                 reason='MARKET_LOCAL_DATE_ENDED';stop.set();break
                             if time.monotonic()>=next_stats:
-                                health=store.stats()['observation']['state']
+                                health=store.observation_snapshot()['observation']['state']
                                 store.set_meta('counters',dict(counters));logger.info(json.dumps({'state':health,'counters':dict(counters)}));next_stats=time.monotonic()+10
                             if time.monotonic()-last_pong>25:
                                 raise TimeoutError('APPLICATION_HEARTBEAT_TIMEOUT')
