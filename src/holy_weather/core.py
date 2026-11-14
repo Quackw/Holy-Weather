@@ -60,8 +60,14 @@ class Config:
     weather_context: bool = False
     lamp_context: bool = False
     price_alert_enabled: bool = False
+    lamp_alert_enabled: bool = False
+    lamp_peak_change_f: str = "2"
 
     def __post_init__(self):
+        if type(self.lamp_alert_enabled)is not bool or (self.lamp_alert_enabled and (not self.lamp_context or self.city!="new-york")):
+            raise ValueError("LAMP_ALERT_REQUIRES_KLGA_CONTEXT")
+        if not isinstance(self.lamp_peak_change_f,str) or not 0<decimal(self.lamp_peak_change_f,price=False)<=20:
+            raise ValueError("LAMP_PEAK_CHANGE_BOUND")
         if type(self.price_alert_enabled)is not bool:raise ValueError("PRICE_ALERT_BOOLEAN")
         if type(self.lamp_context)is not bool or (self.lamp_context and not self.weather_context):
             raise ValueError("LAMP_REQUIRES_WEATHER_CONTEXT")
@@ -103,7 +109,7 @@ class Config:
         return self.date or now.astimezone(ZoneInfo(CITIES[self.city][2])).date().isoformat()
 
     def rule_hash(self):
-        return sha({k: v for k, v in asdict(self).items() if k not in ('data_dir', 'duration_seconds', 'max_reconnects', 'weather_context', 'lamp_context', 'price_alert_enabled')})
+        return sha({k: v for k, v in asdict(self).items() if k not in ('data_dir', 'duration_seconds', 'max_reconnects', 'weather_context', 'lamp_context', 'price_alert_enabled', 'lamp_alert_enabled', 'lamp_peak_change_f')})
 
 
 def normalize(message, received_ms, market, *, change=None):

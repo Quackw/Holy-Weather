@@ -289,6 +289,9 @@ class Store:
             for label,ref in (('__LAMP__',state['input_id']),('__LAMP_POLL__',ident)):
                 self.c.execute('insert into latest values(?,?,?)',(label,'lamp',ref))
             self.c.execute("insert or replace into meta values('lamp_context_v1',?)",(canonical(state),))
+            if self.cfg.lamp_alert_enabled:
+                from .lamp_alert import record
+                record(self,market,state,available_ms)
 
     def price_context(self,at_ms):
         bound=self.c.execute('select payload from market where id=1').fetchone()
