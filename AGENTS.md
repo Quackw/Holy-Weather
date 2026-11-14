@@ -1,9 +1,9 @@
 # HOLY WEATHER development rules
 
-This private project is independent of POLYMETEO. Implement stage 1 only: one weather contract, public prices, event detection, bounded SQLite.
+This private project is independent of POLYMETEO. Stage 1 is accepted. Implement stage 2 weather context only: one New York/KLGA contract, public prices, observed METAR context and bounded SQLite.
 
 - Use codex/ branches and small reviewable PRs. No automatic merging.
-- No production deployment, services, credentials, trading, weather models or Telegram in stage 1. Never change POLYMETEO or share its working databases.
+- No production deployment, services, credentials, trading, weather models or Telegram. AWC observations only; no forecasts or probabilities. Never change POLYMETEO or share its working databases.
 - Keep bid, ask, trade, source time and receipt time distinct. Missing is not zero.
 - New connection/restart is a baseline, never an inferred crossing. Preserve gaps and suppression reasons.
 - One SQLite writer. Preserve event evidence and state; bound data, WAL, logs and memory. No automatic VACUUM.

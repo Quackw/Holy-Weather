@@ -50,8 +50,11 @@ class Config:
     hysteresis: str = '0.02'
     cooldown_seconds: int = 300
     max_reconnects: int = 3
+    weather_context: bool = False
 
     def __post_init__(self):
+        if type(self.weather_context) is not bool or (self.weather_context and self.city != "new-york"):
+            raise ValueError("WEATHER_KLGA_ONLY")
         if self.city not in CITIES or not isinstance(self.bucket, str) or not 1 <= len(self.bucket) <= 80:
             raise ValueError('CITY_OR_BUCKET')
         limits = {'duration_seconds': (1, 3600), 'storage_bytes': (8*1024*1024, 256*1024*1024),
@@ -88,7 +91,7 @@ class Config:
         return self.date or now.astimezone(ZoneInfo(CITIES[self.city][2])).date().isoformat()
 
     def rule_hash(self):
-        return sha({k: v for k, v in asdict(self).items() if k not in ('data_dir', 'duration_seconds', 'max_reconnects')})
+        return sha({k: v for k, v in asdict(self).items() if k not in ('data_dir', 'duration_seconds', 'max_reconnects', 'weather_context')})
 
 
 def normalize(message, received_ms, market, *, change=None):

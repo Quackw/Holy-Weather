@@ -190,10 +190,15 @@ class Store:
             category = 'trade' if sample['kind']=='last_trade_price' else 'quote'
             self.c.execute('insert or replace into latest values(?,?,?)', (sample['token'], category, input_id))
             for event in events:
+                if self.cfg.weather_context:
+                    from .weather import context
+                    event['weather']=context(self.weather_state(),sample['received_ms'],min(p['received_ms'] for p in event['evidence']))
                 ident = sha([sample['id'], self.cfg.rule_hash(), event['type'], event.get('level'), event.get('direction'), event['status']])
                 self.c.execute('insert into events values(?,?,?,?,?,?,?,?)', (ident, input_id, sample['token'], sample['received_ms'], event['type'], event['status'], event.get('reason'), canonical(event)))
                 for ref in {p['input_id'] for p in event['evidence']}:
                     self.c.execute('insert into event_inputs values(?,?)', (ident, ref))
+                for ref in event.get('weather',{}).get('input_ids',[]):
+                    self.c.execute('insert or ignore into event_inputs values(?,?)',(ident,ref))
                 discovery=self.c.execute("select input_id from latest where kind='discovery'").fetchone()
                 if discovery:self.c.execute('insert or ignore into event_inputs values(?,?)',(ident,discovery[0]))
             result={'status': status, 'events': events,'raw_bytes':len(raw),'compressed_bytes':len(compressed)}
@@ -204,6 +209,47 @@ class Store:
             elif status!='FRESH':
                 self.ready_tokens.discard(sample['token'])
         return result
+
+    def weather_state(self):
+        row=self.c.execute("select value from meta where key='weather_context_v1'").fetchone()
+        return json.loads(row[0]) if row else {}
+
+    def weather_status(self):
+        return self.weather_state().get('status','NOT_RECEIVED')
+
+    def record_weather(self, receipt, market, available_ms):
+        from .weather import update
+        if not self.cfg.weather_context:
+            raise ValueError('WEATHER_NOT_ENABLED')
+        state,flags=update(self.weather_state(),receipt,market,available_ms)
+        raw=canonical(dict(receipt=receipt,available_ms=available_ms,report_flags=flags)).encode()
+        compressed=zlib.compress(raw,3)
+        with self.transaction():
+            used=self.c.execute("select coalesce(sum(length(raw)),0) from inputs where identity like 'AWC:%'").fetchone()[0]
+            if used+len(compressed)>4*1024*1024:
+                # Stop weather capture only, never silently expand the shared budget.
+                self.c.execute("insert or replace into meta values('weather_context_v1',?)",
+                               (canonical(dict(self.weather_state(),status='WEATHER_STATE_BOUND')),))
+                return
+            identity='AWC:'+sha(raw)
+            self.c.execute('insert or ignore into inputs(identity,received_ms,raw,raw_sha) values(?,?,?,?)',
+                           (identity,receipt['received_ms'],compressed,sha(raw)))
+            input_id=self.c.execute('select id from inputs where identity=?',(identity,)).fetchone()[0]
+            state['poll_input_id']=input_id
+            for report in state.get('records',[]):
+                if 'input_id' not in report:report['input_id']=input_id
+                if report.get('conflict') and report.get('conflict_input_id') is None:report['conflict_input_id']=input_id
+            # Protect the current projection from explicit input retention, using
+            # the existing latest index. Referenced event evidence is immutable.
+            self.c.execute("delete from latest where kind='weather'")
+            for report in state.get('records',[]):
+                self.c.execute('insert into latest values(?,?,?)',
+                               ('__WEATHER__:'+str(report['observed_ms']),'weather',report['input_id']))
+                if report.get('conflict_input_id'):
+                    self.c.execute('insert into latest values(?,?,?)',
+                                   ('__WEATHER_CONFLICT__:'+str(report['observed_ms']),'weather',report['conflict_input_id']))
+            self.c.execute('insert into latest values(?,?,?)',('__WEATHER_POLL__','weather',input_id))
+            self.c.execute("insert or replace into meta values('weather_context_v1',?)",(canonical(state),))
 
     def set_meta(self, key, value):
         with self.transaction():
@@ -229,6 +275,7 @@ class Store:
                 'foreign_key_errors': len(self.c.execute('pragma foreign_key_check').fetchall()),
                 'compressed_input_bytes':self.c.execute('select coalesce(sum(length(raw)),0) from inputs').fetchone()[0]}
         result.update(self.observation_snapshot(now_ms=now_ms))
+        if self.cfg.weather_context:result['weather_status']=self.weather_status()
         return result
 
     def observation_snapshot(self, *, now_ms=None):
