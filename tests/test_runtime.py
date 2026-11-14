@@ -73,3 +73,22 @@ def test_signal_stop_and_safe_close(cfg,market,monkeypatch):
         assert result['state']=='SIGNAL_STOP'and result['storage']['sqlite_integrity']=='ok'
         with Store(cfg)as store:assert store.stats()['foreign_key_errors']==0
     finally:signal.signal(signal.SIGTERM,old)
+
+
+def test_final_status_after_disconnect_is_not_fresh(cfg,market,monkeypatch):
+    market=dict(market,date=datetime.now(timezone.utc).astimezone(__import__('zoneinfo').ZoneInfo(market['timezone'])).date().isoformat())
+    monkeypatch.setattr(app,'discover',lambda _: (market,{'synthetic':True}))
+    at=app.millis();yes=json.loads(wire(market,'0.6',at));no=dict(yes,asset_id=market['tokens']['NO'])
+    class Fake:
+        def __init__(self):self.actions=[json.dumps([yes,no]),OSError('disconnected')]
+        def __enter__(self):return self
+        def __exit__(self,*a):pass
+        def send(self,value):pass
+        def recv(self,timeout):
+            value=self.actions.pop(0)
+            if isinstance(value,Exception):raise value
+            return value
+    result=app.observe(replace(cfg,max_reconnects=0),connect=lambda *a,**k:Fake())
+    assert result['state']=='NETWORK_RECONNECT_BUDGET_EXHAUSTED'
+    assert result['data_state']=='CONNECTION_UNCONFIRMED'
+    assert all(r['freshness_now']=='FRESH'for r in result['storage']['latest'])

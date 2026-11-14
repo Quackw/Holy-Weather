@@ -114,3 +114,36 @@ remain procedural requirements in AGENTS.md meanwhile. No automatic merge.
 
 The next brick, after review of this stage, is a separately qualified weather
 observation input. It is not implemented here.
+
+## Focused review corrections — 14 November 2026
+
+Replay now validates timezone-aware receipt chronology before opening its output
+store: every envelope must be received at or after its Gamma metadata receipt,
+and receipts cannot move backwards. Provider/source times remain separate and
+unchanged. Invalid ordering is an explicit rejection, never a sorted or repaired
+history. Replay diagnostics and freshness evaluation use the artifact timeline.
+Two cold runs of the original SHA-bound real extract still produce one detected
+and six suppressed crossings, with identical decision counters.
+
+`freshness_now` describes only the stored sample's source and receipt clocks.
+`quote_usable_now` additionally requires the original FRESH status and an ask.
+`observation` separately requires a connected session and a new full top-of-book
+baseline for each outcome. A trade or incremental delta cannot establish that
+baseline. Resolution overrides quote age. Disconnect, restart, invalid-input gap
+and a completed finite observation do not claim a currently healthy stream, even
+when saved quotes remain recent. Standalone `stats` cannot attest a live socket.
+This is observation readiness, not market execution or trading approval.
+
+The original 43 tests plus 14 regression cases pass locally (57 total). The
+regressions include an actual application loop with a synthetic disconnection;
+both saved prices remain recent while the final observation is unconfirmed.
+No detector thresholds, hysteresis, cooldown, 90-second limit or 256-MiB budget
+changed. No SQLite migration or new dependency is needed. Opening a copy of the
+previous 148-KiB qualified database preserves every row in inputs, samples,
+events, event_inputs, latest, state, market and meta; integrity is ok and foreign
+key errors are zero. Original research files and database SHA remain unchanged.
+The original database SHA is recorded above. Evidence is outside Git.
+
+No additional provider traffic or live installation is necessary for these
+replay/status corrections. Linux regression verification is the PR's offline
+GitHub Actions `tests` job; its result must be green before acceptance.

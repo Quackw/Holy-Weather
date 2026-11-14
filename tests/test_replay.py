@@ -33,3 +33,34 @@ def test_cold_replay_and_duplicate_results(cfg,tmp_path,gamma,make_raw):
 def test_replay_refuses_changed_artifact(cfg,tmp_path,gamma,make_raw):
     manifest=corpus(tmp_path,gamma,make_raw);p=manifest.parent/'stream.jsonl';p.write_text(p.read_text()+'\n')
     with pytest.raises(ValueError,match='ARTIFACT_SHA'):replay(cfg,manifest)
+
+
+@pytest.mark.parametrize('case,reason', [('before_gamma','PRECEDES_GAMMA'),('reversed','ORDER_REVERSED'),('naive','TIMEZONE_REQUIRED')])
+def test_invalid_receipt_timeline_refused_before_writes(cfg,tmp_path,gamma,make_raw,case,reason):
+    manifest=corpus(tmp_path,gamma,make_raw);m=json.loads(manifest.read_text())
+    stream=manifest.parent/'stream.jsonl';lines=[json.loads(x) for x in stream.read_text().splitlines()]
+    if case=='before_gamma':m['gamma']['received_at']='2026-11-14T11:13:21+00:00'
+    elif case=='reversed':lines[2]['received_at']=lines[0]['received_at']
+    else:lines[0]['received_at']='2026-11-14T11:13:20'
+    stream.write_text(''.join(json.dumps(x)+'\n' for x in lines));m['stream']['sha256']=sha(stream.read_bytes());manifest.write_text(json.dumps(m))
+    before={p:sha(p.read_bytes()) for p in manifest.parent.iterdir()}
+    with pytest.raises(ValueError,match=reason):replay(cfg,manifest)
+    assert not Path(cfg.data_dir).exists()
+    assert before=={p:sha(p.read_bytes()) for p in manifest.parent.iterdir()}
+
+
+def test_source_time_is_not_substituted_for_receipt(cfg,tmp_path,gamma,make_raw):
+    manifest=corpus(tmp_path,gamma,make_raw);m=json.loads(manifest.read_text())
+    stream=manifest.parent/'stream.jsonl';lines=[json.loads(x) for x in stream.read_text().splitlines()]
+    # Source can predate metadata; availability is determined by receipt, not source.
+    from datetime import datetime
+    m['gamma']['received_at']=lines[0]['received_at']
+    original=int(lines[0]['data']['timestamp'])-1000
+    lines[0]['data']['timestamp']=str(original)
+    stream.write_text(''.join(json.dumps(x)+'\n'for x in lines));m['stream']['sha256']=sha(stream.read_bytes());manifest.write_text(json.dumps(m))
+    result=replay(cfg,manifest)
+    import sqlite3
+    with sqlite3.connect(Path(cfg.data_dir)/'monitor.sqlite3') as c:
+        row=c.execute('select source_ms,received_ms from samples order by input_id limit 1').fetchone()
+    assert row==(original,int(datetime.fromisoformat(lines[0]['received_at']).timestamp()*1000))
+    assert result['storage']['sqlite_integrity']=='ok'

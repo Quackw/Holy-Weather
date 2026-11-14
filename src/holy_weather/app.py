@@ -58,11 +58,16 @@ def process(raw, received_ms, market, store, counters):
                 store.reject(message,'OUT_OF_ORDER_CONFIRMATION',received_ms);counters['OUT_OF_ORDER']+=1;continue
             if previous and received_ms<previous.get('received_ms',previous['persisted_ms']):
                 store.reject(message,'RECEIPT_CLOCK_REVERSED',received_ms);counters['RECEIPT_CLOCK_REVERSED']+=1;continue
-            if quote and previous and sample['id']!=previous['identity']and sample['kind']in ('price_change','best_bid_ask')and(sample['bid'],sample['ask'])==previous['top']and 0<=received_ms-sample['source_ms']<=store.cfg.quote_age_seconds*1000 and 0<=received_ms-previous['persisted_ms']<15000:
+            if quote and previous and (sample['kind']!='best_bid_ask' or sample['token'] in store.ready_tokens) and sample['id']!=previous['identity']and sample['kind']in ('price_change','best_bid_ask')and(sample['bid'],sample['ask'])==previous['top']and 0<=received_ms-sample['source_ms']<=store.cfg.quote_age_seconds*1000 and 0<=received_ms-previous['persisted_ms']<15000:
                 store.seen_tops[sample['token']]=dict(previous,source_ms=sample['source_ms'],received_ms=received_ms,identity=sample['id'])
                 counters['coalesced_unchanged_top_confirmations']+=1;continue
             result = store.apply(sample)
             counters[result['status']] += 1
+            if quote and result['status']!='DUPLICATE':
+                if result['status']=='FRESH' and sample['kind'] in ('book','best_bid_ask'):
+                    store.ready_tokens.add(sample['token'])
+                elif result['status']!='FRESH':
+                    store.ready_tokens.discard(sample['token'])
             counters['stored_input_raw_bytes']+=result.get('raw_bytes',0)
             counters['stored_input_compressed_bytes']+=result.get('compressed_bytes',0)
             if quote and result['status']in ('FRESH','MISSING_ASK'):
@@ -95,15 +100,14 @@ def observe(cfg, *, connect=None, stop=None):
                 try:
                     with connect(WS,proxy=None,open_timeout=10,close_timeout=2,ping_interval=10,ping_timeout=20,
                                  max_size=262144,max_queue=16,compression=None) as ws:
-                        store.gap('CONNECTION_BASELINE',millis())
+                        store.connection_started(millis())
                         ws.send(json.dumps({'type':'market','assets_ids':list(market['tokens'].values()),'custom_feature_enabled':True}))
                         last_ping=time.monotonic();last_pong=last_ping;next_stats=last_ping+10
                         while not stop.is_set() and time.monotonic()<deadline:
                             if datetime.now(timezone.utc).astimezone(ZoneInfo(market['timezone'])).date().isoformat()!=market['date']:
                                 reason='MARKET_LOCAL_DATE_ENDED';stop.set();break
                             if time.monotonic()>=next_stats:
-                                stamps=[r[0]for r in store.c.execute("select s.source_ms from latest l join samples s on s.input_id=l.input_id where l.kind='quote'")]
-                                health='NO_QUOTES' if not stamps else 'STALE' if any(millis()-t>cfg.quote_age_seconds*1000 for t in stamps) else 'QUOTES_FRESH'
+                                health=store.stats()['observation']['state']
                                 store.set_meta('counters',dict(counters));logger.info(json.dumps({'state':health,'counters':dict(counters)}));next_stats=time.monotonic()+10
                             if time.monotonic()-last_pong>25:
                                 raise TimeoutError('APPLICATION_HEARTBEAT_TIMEOUT')
@@ -120,6 +124,7 @@ def observe(cfg, *, connect=None, stop=None):
                             process(raw,millis(),market,store,counters)
                             if store.c.execute("select 1 from meta where key='market_closed'").fetchone():
                                 reason='MARKET_RESOLVED';stop.set()
+                    store.gap('OBSERVATION_ENDED:'+reason,millis())
                     break
                 except InvalidStatus as exc:
                     status=exc.response.status_code
@@ -145,8 +150,7 @@ def observe(cfg, *, connect=None, stop=None):
                     'counters':dict(counters),'storage':store.stats(),'growth_since_discovery_bytes':max(0,store.usage()-initial_bytes),
                     'process_disk_write_bytes':written-initial_writes if written is not None and initial_writes is not None else None,
                     'future_modules_implemented':False}
-            quotes=[r for r in result['storage']['latest']if r['kind']!='last_trade_price']
-            result['data_state']='NO_QUOTES' if not quotes else 'PARTIAL_QUOTES' if len(quotes)<2 or any(r['ask']is None for r in quotes) else 'QUOTES_STALE_OR_CLOCK_UNVERIFIED' if any(r['freshness_now']!='FRESH'for r in quotes) else 'QUOTES_FRESH'
+            result['data_state']=result['storage']['observation']['state']
             if result['storage']['sqlite_integrity']!='ok' or result['storage']['foreign_key_errors']:
                 result.update(state='STORAGE_INTEGRITY_FAILURE',exit_code=4)
             logger.info(json.dumps({'state':reason,'counters':dict(counters)}));return result

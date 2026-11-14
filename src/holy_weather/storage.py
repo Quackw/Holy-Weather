@@ -33,6 +33,8 @@ class Store:
     def __init__(self, cfg, *, session=True):
         self.cfg, self.closed = cfg, False
         self.seen_tops={}
+        self.connected=False
+        self.ready_tokens=set()
         self.root = Path(cfg.data_dir).absolute()
         if self.root.is_symlink():
             raise StorageStop('SYMLINK_DATA_DIRECTORY')
@@ -141,7 +143,13 @@ class Store:
             self.c.execute('insert into diagnostics(received_ms,category,reason) values(?,?,?)', (at, category, reason[:300]))
             self.c.execute('delete from diagnostics where id not in (select id from diagnostics order by id desc limit 512)')
 
+    def connection_started(self, at):
+        self.gap('CONNECTION_BASELINE', at)
+        self.connected=True
+
     def gap(self, reason, at):
+        self.connected=False
+        self.ready_tokens.clear()
         self.seen_tops.clear()
         with self.transaction():
             for row in self.c.execute('select token,payload from state').fetchall():
@@ -197,7 +205,8 @@ class Store:
                            (sha(value),at,zlib.compress(value,3),sha(value)))
         self.gap('INVALID_INPUT:'+reason,at)
 
-    def stats(self):
+    def stats(self, *, now_ms=None):
+        now_ms=int(time.time()*1000) if now_ms is None else now_ms
         result = {'inputs': self.c.execute('select count(*) from inputs').fetchone()[0],
                 'samples': self.c.execute('select count(*) from samples').fetchone()[0],
                 'events': {r[0]: r[1] for r in self.c.execute('select status,count(*) from events group by status')},
@@ -208,8 +217,26 @@ class Store:
                 'compressed_input_bytes':self.c.execute('select coalesce(sum(length(raw)),0) from inputs').fetchone()[0],
                 'latest': [dict(r) for r in self.c.execute('select s.* from latest l join samples s on s.input_id=l.input_id order by s.token,s.kind')]}
         for row in result['latest']:
-            row['age_now_ms']=int(time.time()*1000)-row['source_ms']
-            row['freshness_now']='CLOCK_UNVERIFIED' if row['age_now_ms']<0 else 'STALE' if row['age_now_ms']>self.cfg.quote_age_seconds*1000 else 'FRESH'
+            row['age_now_ms']=now_ms-row['source_ms']
+            row['receipt_age_now_ms']=now_ms-row['received_ms']
+            ages=(row['age_now_ms'],row['receipt_age_now_ms'])
+            row['freshness_now']=('CLOCK_UNVERIFIED' if min(ages)<0 or row['source_ms']>row['received_ms'] else
+                                  'STALE' if max(ages)>self.cfg.quote_age_seconds*1000 else 'FRESH')
+            row['quote_usable_now']=(row['kind']!='last_trade_price' and row['status']=='FRESH'
+                                     and row['ask'] is not None and row['freshness_now']=='FRESH')
+        market=self.c.execute('select payload from market where id=1').fetchone()
+        tokens=json.loads(market[0])['tokens'] if market else {}
+        quotes={r['token']:r for r in result['latest'] if r['kind']!='last_trade_price'}
+        closed=bool(self.c.execute("select 1 from meta where key='market_closed'").fetchone())
+        sides={}
+        for side, token in tokens.items():
+            row=quotes.get(token)
+            sides[side]=('MARKET_RESOLVED' if closed else 'CONNECTION_UNCONFIRMED' if not self.connected else
+                         'AWAITING_BASELINE' if token not in self.ready_tokens else
+                         'QUOTE_UNUSABLE' if not row or not row['quote_usable_now'] else 'READY')
+        result['observation']={'state':('MARKET_RESOLVED' if closed else 'CONNECTION_UNCONFIRMED' if not self.connected else
+                              'QUOTES_FRESH' if len(sides)==2 and all(v=='READY' for v in sides.values()) else 'PARTIAL_OR_UNUSABLE'),
+                              'sides':sides}
         return result
 
     def prune(self, now_ms, *, apply=False):
