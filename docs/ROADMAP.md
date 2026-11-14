@@ -1,8 +1,39 @@
 # Roadmap — planning only
 
-1. **After PR 4 acceptance: stable independent ten-city collection.** Use the smallest bounded runtime arrangement, isolate city failures, validate new local-day contracts/tokens, preserve old data and explicit gaps. Remove execution dependence on Mac/Codex/POLYMETEO. Measure combined storage, per-token/source growth, WAL/logs, memory, CPU and peak message rates. Short joint qualification first; then a separately authorized 48-hour acceptance. No new service architecture by default.
-2. **Transparent weather research.** Keep raw LAMP as the baseline. Separate current METAR, received maximum, contract-eligible maximum, future LAMP peak, remaining local time, bucket boundaries and source age. Freeze causal hypotheses before observing outcomes; evaluate Tmax MAE/bias and boundary misses/false alarms on unseen station-days, with one station-day not counted as many independent cases. No new model code now.
-3. **Weather versus price timing.** On the same future evaluation days, measure whether information preceded price movement and whether a usable quote remained. Include spread, fees and slippage. Delivery or WIN/LOSS alone is not evidence of profit.
-4. **Separate adoption decision.** Only a proven out-of-sample improvement can justify proposing deployment; do not replace original forecasts or mutate research history. No automated trading.
+The approved direction is [two independent tracks](STRATEGY.md), sharing the
+existing monitor and one future Telegram bot. This PR changes documentation only.
+PR #5 Telegram remains separate and unmerged; no rollout is implied.
 
-Only stream-recovery stabilization is authorized for implementation in the current task. These stages create no code, services, databases or PRs by themselves.
+1. **One-city research contract.** Start with New York/KLGA and one verified active
+   bucket/date, both sides. Reuse the finite monitor. Freeze LOCK status criteria,
+   official evidence requirements, LAMP change thresholds and market-comparison
+   windows before evaluating events. Do not assume every city has identical rules.
+2. **LOCK in isolation, preview only.** Implement PRICE WATCH first, with explicit
+   unknowns. Add LIKELY LOCK and RESULT VERIFIED only with tested evidence rules
+   and the contract's official source. Replay causal cases, false warnings,
+   corrections, missing quotes, restart and exact duplicates. No Telegram needed
+   to validate the logic; no unverified outcome may appear as verified.
+3. **LAMP in isolation, preview only.** Trigger on a new bulletin independently of
+   price movement. Compare like-for-like remaining hours; distinguish revisions
+   from hours expiring. Test bucket boundaries, delayed receipts, missing TMP,
+   stale forecasts, duplicates and forecast changes with no new price. Preserve
+   UNKNOWN when market coverage cannot support a reaction claim.
+4. **Combined one-city finite qualification.** Feed shared sources to both tracks
+   while retaining independent events and deduplication. Test restart, gaps,
+   source outages, original-data integrity and the combined 256-MiB budget. Replay
+   both independently and compare their frozen records. Do not rewrite the
+   existing price detector or combine their outputs into a probability.
+5. **One shared sender, separately authorized.** After separate review of PR #5,
+   route approved previews under 🔒 LOCK ALERT and ☀️ LAMP ALERT. Verify per-track
+   duplicate suppression and one track's failure not blocking the other. Obtain
+   explicit approval before live test messages or any deployment.
+6. **New-day evidence, then expansion.** Evaluate both tracks separately on unseen
+   station-days: correctness, false warnings, price response, liquidity, spread
+   and hypothetical net results after costs. Expand to the other nine supported
+   cities only after one-city acceptance and station/rule checks. Stable server
+   operation, date rollover and a bounded 48-hour run require their own scope and
+   authorization, with measured storage/WAL/logs, CPU and memory. No dependence
+   on Mac/Codex/POLYMETEO should be introduced as a permanent runtime design.
+
+No own Tmax model, probabilities, automatic trading, new services or production
+changes are authorized by this plan. Delivery success is not strategy success.
