@@ -5,21 +5,25 @@ temperature contract, both YES/NO tokens**, using Gamma and Polymarket's officia
 public market stream. It stores typed quotes, raw evidence, events and suppression
 reasons in its own SQLite. No account or trading credentials are needed.
 
-## Approved analytical direction
+## Approved notification direction
 
-One project, two independent tracks, one shared Telegram bot:
+**One project, two independent algorithms, one Telegram bot:**
 
-- **🔒 LOCK ALERT** — price watch, provisional likely lock and separately verified
-  official result. 70¢ is a research interest threshold, not a buy recommendation.
-- **☀️ LAMP ALERT** — new original forecast issues, changes in the remaining-day
-  peak and bucket-boundary crossings, compared with contemporaneous prices.
+- **📈 PRICE ALERT** — upward price-threshold crossings, not outcome prediction.
+  Target Netflix rules: 50/55/60/70/80%, Decimal midpoint of the actual side's
+  bid and ask, once per market/side/threshold, no rearm. Exact parity with
+  @holy_nfx_bot must be verified against the original implementation before code.
+- **☀️ LAMP ALERT** — independently triggered by original forecast revisions:
+  verified bucket-boundary crossings or a significant remaining-peak change.
 
-These tracks are **planned, not implemented**. Shared data does not imply shared
-signals, deduplication or a combined probability. See [STRATEGY.md](docs/STRATEGY.md)
-for evidence requirements and existing-versus-planned components, and
-[ROADMAP.md](docs/ROADMAP.md) for the one-city implementation sequence.
-The optional Telegram adapter is in separate, unmerged [PR #5](https://github.com/Quackw/Holy-Weather/pull/5);
-one approved test card was delivered, but there is no production activation.
+These notification algorithms are planned. Existing 50/70/90 ask research events
+remain unchanged and are **not** the Netflix algorithm. No winner/lock strategy
+is part of the product. See [STRATEGY.md](docs/STRATEGY.md) and
+[ROADMAP.md](docs/ROADMAP.md) for implementation and acceptance gates.
+
+Telegram [PR #5](https://github.com/Quackw/Holy-Weather/pull/5) remains unmerged
+pending adaptation to the two message types. Its single approved test delivery
+is not production activation or proof of a durable shared queue.
 
 ## Run
 
