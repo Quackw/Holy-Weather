@@ -92,12 +92,14 @@ def observe(cfg, *, connect=None, stop=None, weather_fetch=None, lamp_fetch=None
         try:
             market,receipt=discover(cfg);store.bind(market,receipt)
             if cfg.weather_context:
-                from .weather import WeatherPoller, fetch_weather, station_check
+                from .weather import WeatherPoller, fetch_weather, station_check, source_for as weather_source
                 station_check(market)
-                weather=WeatherPoller(weather_fetch or fetch_weather)
+                weather=WeatherPoller(weather_fetch or (lambda: fetch_weather(station=market['station'])))
+                weather.source=weather_source(market['station'])
             if cfg.lamp_context:
-                from .lamp import LampPoller,fetch_lamp
-                lamp=LampPoller(lamp_fetch or fetch_lamp)
+                from .lamp import LampPoller,fetch_lamp,source_for as lamp_source
+                lamp=LampPoller(lamp_fetch or (lambda: fetch_lamp(station=market['station'])))
+                lamp.source=lamp_source(market['station'])
             initial_bytes=store.usage();initial_writes=disk_write_bytes();started=time.monotonic();attempt=0
             while not stop.is_set() and time.monotonic()<deadline:
                 try:

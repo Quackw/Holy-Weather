@@ -14,7 +14,14 @@ from zoneinfo import ZoneInfo
 
 CITIES = {'new-york': ('nyc', 'KLGA', 'America/New_York'),
           'atlanta': ('atlanta', 'KATL', 'America/New_York'),
-          'seattle': ('seattle', 'KSEA', 'America/Los_Angeles')}
+          'seattle': ('seattle', 'KSEA', 'America/Los_Angeles'),
+          'miami': ('miami', 'KMIA', 'America/New_York'),
+          'chicago': ('chicago', 'KORD', 'America/Chicago'),
+          'dallas': ('dallas', 'KDAL', 'America/Chicago'),
+          'austin': ('austin', 'KAUS', 'America/Chicago'),
+          'houston': ('houston', 'KHOU', 'America/Chicago'),
+          'los-angeles': ('los-angeles', 'KLAX', 'America/Los_Angeles'),
+          'san-francisco': ('san-francisco', 'KSFO', 'America/Los_Angeles')}
 
 
 def canonical(value):
@@ -56,8 +63,8 @@ class Config:
     def __post_init__(self):
         if type(self.lamp_context)is not bool or (self.lamp_context and not self.weather_context):
             raise ValueError("LAMP_REQUIRES_WEATHER_CONTEXT")
-        if type(self.weather_context) is not bool or (self.weather_context and self.city != "new-york"):
-            raise ValueError("WEATHER_KLGA_ONLY")
+        if type(self.weather_context) is not bool:
+            raise ValueError("WEATHER_CONTEXT_BOOLEAN")
         if self.city not in CITIES or not isinstance(self.bucket, str) or not 1 <= len(self.bucket) <= 80:
             raise ValueError('CITY_OR_BUCKET')
         limits = {'duration_seconds': (1, 3600), 'storage_bytes': (8*1024*1024, 256*1024*1024),

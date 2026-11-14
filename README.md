@@ -178,3 +178,22 @@ retention preserves referenced forecast evidence. Source rollback to stage 2 use
 its weather-only config (omit `lamp_context`); the database is not restored from
 an old snapshot. Replay supports causal `kind: lamp` envelopes with immutable
 receipts. See [stage 3 qualification](docs/STAGE3_QUALIFICATION.md).
+
+## Ten-city extension
+
+The same finite, one-contract monitor accepts `new-york`, `atlanta`, `miami`,
+`chicago`, `dallas`, `austin`, `houston`, `los-angeles`, `san-francisco`, `seattle`.
+Both weather flags may be enabled for each. AWC and original LAMP URLs are derived
+from the station whose identity was verified against that contract's rules and
+resolution source. No nearby-station substitution is allowed. Station/time-zone
+pairs are explicitly pinned in `core.CITIES`; a mismatch fails closed.
+
+This extends supported configurations, not a deployed ten-city service. Each
+finite run still owns one contract/database. Keep different cities in separate
+owned data directories. For ten retained runs allocate at most 25 MiB per city
+(250 MiB total); do not run ten default 256 MiB allocations and describe that as
+a shared 256 MiB budget. No automatic concurrent fleet or date rollover is added.
+Select the exact currently offered bucket for each run; an absent bucket is an
+explicit refusal. Historical snapshots are never rebound to another city/day.
+
+See `docs/TEN_CITY_QUALIFICATION.md` for the station matrix and real qualification.
