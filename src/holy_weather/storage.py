@@ -204,6 +204,9 @@ class Store:
                     self.c.execute('insert into event_inputs values(?,?)', (ident, ref))
                 for ref in set(event.get('weather',{}).get('input_ids',[])) | set(event.get('lamp',{}).get('input_ids',[])):
                     self.c.execute('insert or ignore into event_inputs values(?,?)',(ident,ref))
+                for price in event.get('prices',{}).values():
+                    if price.get('input_id'):
+                        self.c.execute('insert or ignore into event_inputs values(?,?)',(ident,price['input_id']))
                 discovery=self.c.execute("select input_id from latest where kind='discovery'").fetchone()
                 if discovery:self.c.execute('insert or ignore into event_inputs values(?,?)',(ident,discovery[0]))
             result={'status': status, 'events': events,'raw_bytes':len(raw),'compressed_bytes':len(compressed)}
@@ -257,6 +260,7 @@ class Store:
                 result[side]={'ask':None,'status':'NOT_AVAILABLE'}
             else:
                 result[side]={k:r[k]for k in ('input_id','bid','ask','source_ms','received_ms','freshness_now','status','quote_usable_now')}
+            result[side]['observation_state']=snapshot['observation']['sides'][side]
         return result
 
     def forecast_card(self,at_ms):
@@ -372,7 +376,9 @@ class Store:
         """
         cutoff = now_ms-24*3600*1000
         query = '''select id from inputs where received_ms<? and id not in
-                   (select input_id from event_inputs union select input_id from events union select input_id from latest)'''
+                   (select input_id from event_inputs union select input_id from events union select input_id from latest
+                    union select json_extract(p.value,'$.input_id') from events e, json_each(e.payload,'$.prices') p
+                    where json_extract(p.value,'$.input_id') is not null)'''
         candidates = [r[0] for r in self.c.execute(query, (cutoff,))]
         if apply:
             with self.transaction():

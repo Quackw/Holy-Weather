@@ -184,7 +184,7 @@ def format_card(card):
     for side in ('YES','NO'):
         p=card['prices'].get(side,{})
         value='н/д' if p.get('ask')is None else str(Decimal(p['ask'])*100)+'¢'
-        prices.append(side+' ask '+value+' ['+p.get('status','NOT_AVAILABLE')+', '+p.get('freshness_now','UNKNOWN')+']')
+        prices.append(side+' ask '+value+' ['+p.get('status','NOT_AVAILABLE')+', '+p.get('freshness_now','UNKNOWN')+', '+p.get('observation_state','UNCONFIRMED')+']')
     distance=None
     if b.get('next_boundary_f') is not None and f.get('observed_max_f') is not None:
         distance=str(Decimal(b['next_boundary_f'])-Decimal(f['observed_max_f']))
@@ -197,5 +197,5 @@ def format_card(card):
         'Бакет '+b.get('label','н/д')+': ['+b.get('lower_f','?')+', '+b.get('upper_f','?')+') °F; до следующей границы '+number(distance),
         ' | '.join(prices),
         'LAMP: заголовок '+stamp(f['issue_ms'])+'; получен '+stamp(f['received_ms']),
-        'Погода: '+w['freshness']+' / '+w['completeness']+'. Не вероятность и не сигнал к покупке.'
+        'Погода: '+w['freshness']+' / '+w['completeness']+'; источник '+w.get('provider_status','UNKNOWN')+'. Не вероятность и не сигнал к покупке.'
     ])

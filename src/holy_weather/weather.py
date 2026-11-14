@@ -72,6 +72,7 @@ def decode(receipt, market, available_ms):
         raise ValueError('WEATHER_REPORT_BOUND')
     reports = []
     for row in rows:
+        if not isinstance(row,dict):raise ValueError('WEATHER_REPORT_OBJECT')
         raw = row.get('rawOb', '')
         if row.get('icaoId') != market['station'] or not isinstance(raw,str) or len(raw)>2048:
             raise ValueError('WEATHER_STATION_OR_RAW')
@@ -95,6 +96,12 @@ def decode(receipt, market, available_ms):
         whole = int(group[1].replace('M','-'))
         if abs(Decimal(str(temp))-whole) > Decimal('0.6'):
             raise ValueError('WEATHER_TEMPERATURE_MISMATCH')
+        precise=re.findall(r'(?:^|\s)T([01])(\d{3})[01]\d{3}(?=\s|$)',raw)
+        if len(precise)>1:raise ValueError('WEATHER_AMBIGUOUS_PRECISE_TEMPERATURE')
+        if precise:
+            sign,value=precise[0]
+            exact=Decimal(value)/10*(-1 if sign=='1' else 1)
+            if Decimal(str(temp))!=exact:raise ValueError('WEATHER_PRECISE_TEMPERATURE_MISMATCH')
         local_date=utc.astimezone(ZoneInfo(market['timezone'])).date().isoformat()
         reports.append(dict(station=market['station'], raw_metar=raw, temperature_c=str(temp), units='C',
                             observed_ms=observed_ms, received_ms=received, available_ms=available_ms,
