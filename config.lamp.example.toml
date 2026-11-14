@@ -1,0 +1,9 @@
+# One finite NYC/KLGA context preview. Verify today's native contract first.
+city = "new-york"
+bucket = "46-47°F"
+duration_seconds = 120
+data_dir = "data"
+weather_context = true
+lamp_context = true
+storage_bytes = 268435456
+quote_age_seconds = 90
