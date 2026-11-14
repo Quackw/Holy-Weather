@@ -62,3 +62,7 @@ Temporary Linux artifacts remain; no additional cleanup or live run performed.
 Conclusion: public-source access and bounded lifecycle demonstrated on Linux;
 price freshness partial, genuine alert generation and delivery not exercised.
 The PR remains unmerged. Production and Telegram remain untouched.
+
+Follow-up: the separately authorized bounded diagnostic run and its raw-message
+classification are documented in [QUOTE_STREAM_20261114.md](QUOTE_STREAM_20261114.md).
+This does not retroactively identify the ignored messages from the first run.

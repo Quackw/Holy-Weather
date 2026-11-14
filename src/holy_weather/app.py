@@ -59,7 +59,15 @@ def process(raw, received_ms, market, store, counters):
         try:
             sample = normalize(message,received_ms,market,change=change)
             if sample is None:
-                counters['ignored_depth_or_control']+=1;continue
+                counters['ignored_depth_or_control']+=1
+                # Lifecycle broadcasts are not price updates for our tokens.
+                # Fixed counter names avoid cardinality or per-frame SQL growth.
+                kind=message.get('event_type')
+                counter=('ignored_new_market' if kind=='new_market' else
+                         'ignored_tick_size_change' if kind=='tick_size_change' else 'ignored_unknown_type')
+                counters[counter]+=1
+                continue
+            counters['received_'+sample['kind']]+=1
             if store.known_duplicate(sample):
                 counters['DUPLICATE']+=1
                 if counters['DUPLICATE']==1 or counters['DUPLICATE']%128==0:
