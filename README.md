@@ -5,6 +5,22 @@ temperature contract, both YES/NO tokens**, using Gamma and Polymarket's officia
 public market stream. It stores typed quotes, raw evidence, events and suppression
 reasons in its own SQLite. No account or trading credentials are needed.
 
+## Approved analytical direction
+
+One project, two independent tracks, one shared Telegram bot:
+
+- **🔒 LOCK ALERT** — price watch, provisional likely lock and separately verified
+  official result. 70¢ is a research interest threshold, not a buy recommendation.
+- **☀️ LAMP ALERT** — new original forecast issues, changes in the remaining-day
+  peak and bucket-boundary crossings, compared with contemporaneous prices.
+
+These tracks are **planned, not implemented**. Shared data does not imply shared
+signals, deduplication or a combined probability. See [STRATEGY.md](docs/STRATEGY.md)
+for evidence requirements and existing-versus-planned components, and
+[ROADMAP.md](docs/ROADMAP.md) for the one-city implementation sequence.
+The optional Telegram adapter is in separate, unmerged [PR #5](https://github.com/Quackw/Holy-Weather/pull/5);
+one approved test card was delivered, but there is no production activation.
+
 ## Run
 
 Python 3.11+ on Linux or macOS. One runtime dependency: `websockets==17.1`.
@@ -85,8 +101,8 @@ runtime dependency. See [docs/QUALIFICATION.md](docs/QUALIFICATION.md).
 
 Stage 2 optionally adds observed KLGA weather context as described below.
 Stage 3 optionally adds original hourly LAMP context as described below.
-Own forecast models, Telegram, production installation and a 48-hour supervisor
-remain outside the implementation. Price alerts
+Own forecast models, production installation and a 48-hour supervisor
+remain outside the implementation. Telegram is separate work in PR #5, not part of main. Price alerts
 establish neither warming accuracy nor trading advantage. No orders are placed.
 
 
