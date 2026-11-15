@@ -125,10 +125,12 @@ def test_midnight_during_connect_never_subscribes_old_day(gamma,tmp_path):
     from zoneinfo import ZoneInfo
     cfg,markets=setup(gamma,tmp_path,1);m,receipt=markets[0]
     midnight=int((datetime.fromisoformat(m['date'])+timedelta(days=1)).replace(tzinfo=ZoneInfo(m['timezone'])).timestamp()*1000)
-    at=[midnight-1];sent=[]
+    at=[midnight-1];sent=[];ticks=[0.0]
     class WS:
         def __enter__(self):at[0]=midnight;return self
         def __exit__(self,*a):pass
         def send(self,raw):sent.append(raw)
-    r=observe_catalogue(cfg,discover=lambda city:([m],receipt,[]) if city=='london' else ([],{},[]),connect=lambda *a,**k:WS(),clock=lambda:at[0])
-    assert not sent and r['state']=='ALL_MARKETS_CLOSED_OR_LOCAL_DATE_ENDED'
+    r=observe_catalogue(replace(cfg,duration_seconds=2),discover=lambda city:([m],receipt,[]) if city=='london' else ([],{},[]),connect=lambda *a,**k:WS(),clock=lambda:at[0],monotonic=lambda:ticks[0],wait=lambda d:ticks.__setitem__(0,ticks[0]+d))
+    assert not sent
+    assert r['cities']['london']['verified_buckets']==0
+    assert 'DISCOVERY_CITY_DATE' in r['cities']['london']['reason']

@@ -16,6 +16,12 @@ from .app import process
 
 MAX_MARKETS = 176  # eleven cities, at most sixteen verified buckets each
 PREFIX = 'price_catalogue_v1:'
+DAY_PREFIX = 'price_catalogue_day_v1:'
+
+
+def local_days(at):
+    now=datetime.fromtimestamp(at/1000,timezone.utc)
+    return {city:now.astimezone(ZoneInfo(v[2])).date().isoformat() for city,v in EUROPE_CITIES.items()}
 
 
 @dataclass(frozen=True)
@@ -43,7 +49,12 @@ class CatalogueStore(Store):
         self.markets = {}; self.tokens = {}
         super().__init__(cfg, **kwargs)
         try:
-            for row in self.c.execute('select value from meta where key like ?', (PREFIX+'%',)):
+            # Load only the latest retained date per station; older identities/evidence
+            # remain in SQLite, not in the bounded subscription registry.
+            for row in self.c.execute("""select m.value from meta m where m.key like ?
+                and json_extract(m.value,'$.date')=(select max(json_extract(h.value,'$.date'))
+                  from meta h where h.key like ? and json_extract(h.value,'$.station')=json_extract(m.value,'$.station'))
+                limit ?""", (PREFIX+'%',PREFIX+'%',MAX_MARKETS+1)):
                 self._register(json.loads(row[0]))
         except Exception:
             self.close(); raise
@@ -62,11 +73,13 @@ class CatalogueStore(Store):
         condition=market['condition_id'].lower()
         if market['station'] not in {v[1] for v in EUROPE_CITIES.values()}:
             raise StorageStop('CATALOGUE_EUROPE_ONLY')
-        prior=self.markets.get(condition)
+        saved=self.c.execute('select value from meta where key=?',(PREFIX+condition,)).fetchone()
+        prior=json.loads(saved[0]) if saved else None
         if prior and prior!=market:raise StorageStop('MARKET_IDENTITY_OR_RULE_DRIFT')
         if condition not in self.markets and len(self.markets)>=MAX_MARKETS:
             raise StorageStop('CATALOGUE_MARKET_BOUND')
-        if any(t in self.tokens and self.tokens[t]!=condition for t in market['tokens'].values()):
+        if any(self.c.execute("select 1 from meta where key like ? and key!=? and (json_extract(value,'$.tokens.YES')=? or json_extract(value,'$.tokens.NO')=?) limit 1",
+                              (PREFIX+'%',PREFIX+condition,t,t)).fetchone() for t in market['tokens'].values()):
             raise StorageStop('CATALOGUE_TOKEN_COLLISION')
         raw=canonical(receipt).encode()
         if len(raw)>4_100_000:raise StorageStop('CATALOGUE_RECEIPT_BOUND')
@@ -80,8 +93,31 @@ class CatalogueStore(Store):
             self.c.execute('insert or replace into latest values(?,?,?)',('__MARKET__'+condition,'discovery',ref))
         self._register(market)
 
+    def retain_discovery(self, receipt):
+        raw=canonical(receipt).encode()
+        if len(raw)>4_100_000:raise StorageStop('CATALOGUE_RECEIPT_BOUND')
+        at=int(datetime.fromisoformat(receipt['received_at']).timestamp()*1000)
+        identity='GAMMA:'+sha(raw)
+        with self.transaction():
+            self.c.execute('insert or ignore into inputs(identity,received_ms,raw,raw_sha) values(?,?,?,?)',
+                           (identity,at,zlib.compress(raw,3),sha(raw)))
+        return self.c.execute('select id from inputs where identity=?',(identity,)).fetchone()[0]
+
     def market_for_token(self, token):
-        return self.markets[self.tokens[token]]
+        if token in self.tokens:return self.markets[self.tokens[token]]
+        row=self.c.execute("select value from meta where key like ? and (json_extract(value,'$.tokens.YES')=? or json_extract(value,'$.tokens.NO')=?) limit 1",(PREFIX+'%',token,token)).fetchone()
+        if not row:raise StorageStop('UNKNOWN_CATALOGUE_TOKEN')
+        return json.loads(row[0])
+
+    def retire(self, at):
+        """Remove ended markets from memory only; never delete audit or dedupe."""
+        for condition in list(self.markets):
+            if self.active(condition,at):continue
+            market=self.markets.pop(condition)
+            for token in market['tokens'].values():
+                self.tokens.pop(token,None);self.seen_tops.pop(token,None)
+                self.ready_tokens.discard(token);self.price_alert_ready.discard(token)
+                self.pending_baselines.pop(token,None)
 
     def discovery_reference(self, token):
         return self.c.execute("select input_id from latest where token=? and kind='discovery'",
@@ -106,18 +142,20 @@ class CatalogueStore(Store):
         if was_connected:self.pending_baselines={t:time.monotonic() for t in self.tokens}
 
     def active(self, condition, at):
-        market=self.markets[condition]
+        row=None if condition in self.markets else self.c.execute('select value from meta where key=?',(PREFIX+condition,)).fetchone()
+        market=self.markets[condition] if row is None else json.loads(row[0])
         today=datetime.fromtimestamp(at/1000,timezone.utc).astimezone(ZoneInfo(market['timezone'])).date().isoformat()
         return today==market['date'] and not self.c.execute('select 1 from meta where key=?',('market_closed:'+condition,)).fetchone()
 
-    def expire_closed_deliveries(self, at):
+    def expire_closed_deliveries(self, at, selected=None):
         rows=self.c.execute("select key,value from meta where key like 'alert_delivery_v1:%' and json_extract(value,'$.status')='PENDING'").fetchall()
         expired=[]
         for row in rows:
             value=json.loads(row['value'])
             event=self.c.execute('select token from events where id=?',(value['event_id'],)).fetchone()
-            if event and not self.active(self.tokens[event[0]],at):
-                value.update(status='EXPIRED',completed_ms=at,reason='MARKET_CLOSED_OR_LOCAL_DATE_ENDED')
+            condition=self.market_for_token(event[0])['condition_id'].lower() if event else None
+            if event and (not self.active(condition,at) or (selected is not None and condition not in selected)):
+                value.update(status='EXPIRED',completed_ms=at,reason='MARKET_CLOSED_DATE_ENDED_OR_NOT_REVALIDATED')
                 expired.append((canonical(value),row['key']))
         if expired:
             with self.transaction():self.c.executemany('update meta set value=? where key=?',expired)
@@ -174,6 +212,8 @@ def discover_city(city, *, clock=None, fetch=None):
         body=response.read(4_000_001);status=response.status
     if status!=200 or len(body)>4_000_000:raise ValueError('GAMMA_HTTP_OR_BODY_BOUND')
     received=clock();doc=json.loads(body)
+    receipt=dict(url=url,http=status,requested_at=at.isoformat(),received_at=received.isoformat(),sha256=sha(body),raw_body=body.decode())
+    if doc==[]:return [],receipt,[{'reason':'EXACT_EVENT_NOT_PUBLISHED'}]
     if not isinstance(doc,list) or len(doc)!=1 or doc[0].get('slug')!=slug:raise ValueError('EXACT_EVENT_REQUIRED')
     candidates=doc[0].get('markets',[])
     if not isinstance(candidates,list) or len(candidates)>64:raise ValueError('GAMMA_CATALOGUE_BOUND')
@@ -188,13 +228,80 @@ def discover_city(city, *, clock=None, fetch=None):
             skipped.append({'bucket':str(bucket)[:80],'reason':str(exc)[:160]})
     if len(markets)>16:raise ValueError('CITY_MARKET_BOUND')
     if len({m['condition_id'] for m in markets})!=len(markets):raise ValueError('DUPLICATE_MARKET_IDENTITY')
-    receipt=dict(url=url,http=status,requested_at=at.isoformat(),received_at=received.isoformat(),sha256=sha(body),raw_body=body.decode())
     return markets,receipt,skipped
+
+
+class DayDiscovery:
+    """Revalidate on restart/date change; bounded retries only for known unavailability."""
+    def __init__(self, store, discover, clock):
+        self.store=store;self.discover=discover;self.clock=clock
+        self.days={};self.selected=set();self.results={};self.retry={}
+
+    def due(self):
+        at=self.clock()
+        return local_days(at)!=self.days or any(at>=v for v in self.retry.values())
+
+    def refresh(self, stopped=lambda:False):
+        s=self.store
+        for city,day in local_days(self.clock()).items():
+            if stopped():break
+            at=self.clock()
+            # Date may change while earlier cities are being fetched.
+            day=local_days(at)[city]
+            if self.days.get(city)==day and at<self.retry.get(city,float('inf')):continue
+            self.days[city]=day;self.retry.pop(city,None)
+            station=EUROPE_CITIES[city][1]
+            self.selected={c for c in self.selected if s.markets[c]['station']!=station}
+            s.expire_closed_deliveries(at);s.retire(at)
+            self.selected.intersection_update(s.markets)
+            key=DAY_PREFIX+city
+            row=s.c.execute('select value from meta where key=?',(key,)).fetchone()
+            previous=json.loads(row[0]) if row else {}
+            if previous.get('day','')>day:
+                self.results[city]={'verified_buckets':0,'reason':'LOCAL_DATE_REGRESSION'};continue
+            same=previous.get('day')==day
+            if same and previous.get('status') in ('IN_PROGRESS','BLOCKED'):
+                self.results[city]={'verified_buckets':0,'reason':'DISCOVERY_'+previous['status']};continue
+            attempts=previous.get('attempts',0) if same and previous.get('status')!='VERIFIED' else 0
+            if attempts>=3:
+                self.results[city]={'verified_buckets':0,'reason':'DISCOVERY_ATTEMPTS_EXHAUSTED'};continue
+            if same and previous.get('next_ms',0)>at:
+                self.retry[city]=previous['next_ms'];continue
+            state=dict(day=day,attempts=attempts+1,status='IN_PROGRESS',at_ms=at)
+            s.set_meta(key,state)
+            try:
+                markets,receipt,skipped=self.discover(city)
+                if receipt:
+                    state['receipt_input_id']=s.retain_discovery(receipt)
+                state['skipped']=skipped
+                if len(markets)>16:raise ValueError('CITY_MARKET_BOUND')
+                received=int(datetime.fromisoformat(receipt['received_at']).timestamp()*1000) if markets else at
+                for market in markets:
+                    if (market['station']!=station or market['timezone']!=EUROPE_CITIES[city][2]
+                            or market['date']!=day or local_days(self.clock())[city]!=day
+                            or local_days(received)[city]!=day or received>self.clock()):
+                        raise ValueError('DISCOVERY_CITY_DATE_OR_RECEIPT_MISMATCH')
+                for market in markets:s.bind(market,receipt)
+                self.selected.update(m['condition_id'].lower() for m in markets)
+                state.update(status='VERIFIED' if markets else 'UNAVAILABLE')
+                self.results[city]={'verified_buckets':len(markets),'skipped':skipped}
+            except (OSError,ValueError,KeyError,TypeError) as exc:
+                from urllib.error import HTTPError
+                blocked=isinstance(exc,HTTPError) and exc.code in (401,403,429)
+                # Rule/identity/parser errors are not transient transport errors.
+                blocked=blocked or not isinstance(exc,OSError)
+                state.update(status='BLOCKED' if blocked else 'UNAVAILABLE',reason=type(exc).__name__+':'+str(exc)[:160])
+                self.results[city]={'verified_buckets':0,'reason':state['reason']}
+            if state['status']=='UNAVAILABLE' and state['attempts']<3:
+                state['next_ms']=self.clock()+300000
+                self.retry[city]=state['next_ms']
+            s.set_meta(key,state)
+        s.expire_closed_deliveries(self.clock(),self.selected)
 
 
 def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=None, token=None,
                       clock=None, monotonic=time.monotonic, stop=None, wait=None):
-    """Finite session with configured reconnect budget; no rollover or service."""
+    """Finite session with local-day revalidation; no service or extended deadline."""
     import threading
     from websockets.exceptions import WebSocketException
     from .app import WS,millis
@@ -207,34 +314,33 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
     result={'cities':{},'state':'PREPARING','telegram_enabled':cfg.telegram_enabled,'weather_enabled':False}
     with CatalogueStore(cfg) as store:
         try:
-            # Reopening requires the same pinned catalogue; discovery revalidates it.
-            selected=set()
-            for city in EUROPE_CITIES:
-                if stop.is_set():break
-                try:
-                    markets,receipt,skipped=discover(city)
-                    for market in markets:store.bind(market,receipt);selected.add(market['condition_id'].lower())
-                    result['cities'][city]={'verified_buckets':len(markets),'skipped':skipped}
-                except (OSError,ValueError,KeyError,TypeError) as exc:
-                    result['cities'][city]={'verified_buckets':0,'reason':type(exc).__name__+':'+str(exc)[:160]}
-            if not selected:
-                result['state']='NO_VERIFIED_OPEN_MARKETS';return result
-            # Do not resubscribe historical or currently unverified entries on restart.
-            tokens=[t for t,c in store.tokens.items() if c in selected and store.active(c,clock())]
-            if not tokens:
-                result['state']='NO_CURRENT_LOCAL_DATE_MARKETS';return result
-            router=Router(store,selected)
             deadline=monotonic()+cfg.duration_seconds
+            days=DayDiscovery(store,discover,clock)
+            stopped=lambda:stop.is_set() or monotonic()>=deadline
+            days.refresh(stopped)
+            selected=days.selected
+            result['cities']=days.results
+            router=Router(store,selected)
             result['state']='COMPLETED_WINDOW'
             reconnects=0
             while not stop.is_set() and monotonic()<deadline:
+                if days.due():
+                    store.gap('LOCAL_DAY_OR_DISCOVERY_REFRESH',clock())
+                    days.refresh(stopped)
+                    selected=days.selected;result['cities']=days.results
+                    router.selected=set(selected)
+                    for condition in selected:router.per_market.setdefault(condition,Counter())
                 tokens=[t for t,c in store.tokens.items() if c in selected and store.active(c,clock())]
                 if not tokens:
-                    result['state']='ALL_MARKETS_CLOSED_OR_LOCAL_DATE_ENDED';break
+                    result['state']='NO_VERIFIED_CURRENT_MARKETS'
+                    if wait(min(1,max(0,deadline-monotonic()))):break
+                    continue
+                result['state']='COMPLETED_WINDOW'
                 try:
                     with connect(WS,proxy=None,open_timeout=10,close_timeout=2,ping_interval=10,ping_timeout=20,
                                  max_size=262144,max_queue=16,compression=None) as ws:
                         tokens=[t for t in tokens if store.active(store.tokens[t],clock())]
+                        if days.due():continue
                         if not tokens:
                             result['state']='ALL_MARKETS_CLOSED_OR_LOCAL_DATE_ENDED';break
                         store.connection_started(clock())
@@ -243,6 +349,7 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
                         last_ping=monotonic();last_pong=last_ping;next_stats=last_ping
                         while not stop.is_set() and monotonic()<deadline:
                             at=clock()
+                            if days.due():break
                             if subscribed<len(tokens) and monotonic()>=next_subscription:
                                 batch=[t for t in tokens[subscribed:subscribed+16] if store.active(store.tokens[t],at)]
                                 if batch:ws.send(canonical({'operation':'subscribe','assets_ids':batch,'custom_feature_enabled':True}))
@@ -287,6 +394,7 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
                         result['state']='DEADLINE_DURING_GAP';break
                     continue
                 else:
+                    if days.due() or not any(store.active(c,clock()) for c in selected):continue
                     break
             store.gap('CATALOGUE_SESSION_ENDED',clock())
             result['reconnects']=reconnects
