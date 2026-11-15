@@ -37,7 +37,7 @@ def record(store,sample,status):
         current['midpoint']=price
         events=[]
         if levels:
-            market=json.loads(store.c.execute('select payload from market where id=1').fetchone()[0])
+            market=store.market_for_token(token)
             side=next(s for s,t in market['tokens'].items() if t==token)
             ident=sha(['PRICE_ALERT_V1',market['condition_id'],token,levels])
             event=dict(type='PRICE_ALERT',status='DETECTED',track='PRICE',side=side,token=token,
@@ -45,7 +45,7 @@ def record(store,sample,status):
                        metric='DECIMAL_MIDPOINT',previous=previous,current=current,market_url=market['url'],bucket=market['bucket'])
             store.c.execute('insert into events values(?,?,?,?,?,?,?,?)',(ident,sample['input_id'],token,sample['received_ms'],'PRICE_ALERT','DETECTED',None,canonical(event)))
             refs={previous['input_id'],sample['input_id']}
-            discovery=store.c.execute("select input_id from latest where kind='discovery'").fetchone()
+            discovery=store.discovery_reference(token)
             if discovery:refs.add(discovery[0])
             for ref in refs:store.c.execute('insert into event_inputs values(?,?)',(ident,ref))
             from .alert_queue import enqueue

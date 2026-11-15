@@ -140,6 +140,19 @@ class Store:
             ident=self.c.execute('select id from inputs where identity=?',(identity,)).fetchone()[0]
             self.c.execute('insert or replace into latest values(?,?,?)',('__MARKET__','discovery',ident))
 
+    def market_for_token(self, token):
+        row=self.c.execute('select payload from market where id=1').fetchone()
+        market=json.loads(row[0]) if row else None
+        if not market or token not in market['tokens'].values():
+            raise StorageStop('TOKEN_WITHOUT_BOUND_MARKET')
+        return market
+
+    def discovery_reference(self, token):
+        return self.c.execute("select input_id from latest where token='__MARKET__' and kind='discovery'").fetchone()
+
+    def closed_key(self, sample):
+        return 'market_closed'
+
     def diagnostic(self, category, reason, at):
         with self.transaction():
             self.c.execute('insert into diagnostics(received_ms,category,reason) values(?,?,?)', (at, category, reason[:300]))
@@ -207,9 +220,9 @@ class Store:
                                  (sample['id'], sample['received_ms'], compressed, sha(raw)))
             input_id = cur.lastrowid
             if sample['kind'] == 'market_resolved':
-                self.c.execute("insert or replace into meta values('market_closed','true')")
+                self.c.execute("insert or replace into meta values(?,'true')",(self.closed_key(sample),))
                 return {'status': 'MARKET_RESOLVED', 'events': []}
-            if self.c.execute("select 1 from meta where key='market_closed'").fetchone():
+            if self.c.execute("select 1 from meta where key=?",(self.closed_key(sample),)).fetchone():
                 return {'status': 'AFTER_RESOLUTION', 'events': []}
             sample = dict(sample, input_id=input_id)
             row = self.c.execute('select payload from state where token=?', (sample['token'],)).fetchone()
@@ -244,7 +257,7 @@ class Store:
                 for price in event.get('prices',{}).values():
                     if price.get('input_id'):
                         self.c.execute('insert or ignore into event_inputs values(?,?)',(ident,price['input_id']))
-                discovery=self.c.execute("select input_id from latest where kind='discovery'").fetchone()
+                discovery=self.discovery_reference(sample['token'])
                 if discovery:self.c.execute('insert or ignore into event_inputs values(?,?)',(ident,discovery[0]))
             if self.cfg.price_alert_enabled:
                 from .price_alert import record
