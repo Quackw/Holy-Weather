@@ -95,3 +95,53 @@ from weather alone, no Telegram and no overwrite of existing evidence.
 Live proof is reported separately from the offline tests. The previous
 `NO_VERIFIED_FRESH_COMPLETE_CANDIDATE` result remains immutable evidence of the
 superseded preflight. It is not reclassified as a successful WebSocket observation.
+
+## Authorized Linux observation — November 15, 2026
+
+Manifest `65896398e70521a8f3871dcc59a12524aabbf0b766e7c0267f8c2fb2effad887`
+and bundle `45d2dd24776e2043858a01fe7ecdee4156b8008717bc789c94b6f7632c6128d8`
+ran once in `/var/tmp/holy-weather-ws-first-0dwhmsq2` on the explicitly approved
+host. All source/dependency pins matched. No installation, production operation
+or Telegram request occurred. The run stopped normally after its finite window;
+no reconnect or second launch was performed.
+
+Normal discovery selected Seattle/KSEA 54–55°F, market day November 14, and
+verified the exact open contract, rules and YES/NO tokens. Metadata ranking does
+not establish present liquidity: this selected contract did not offer a complete
+native bid/ask pair. That observation is not generalized to all Seattle contracts.
+
+The loop ran 331.02 seconds including bounded receive/shutdown overhead (configured
+330 seconds). It opened WebSocket directly and completed with `COMPLETED_WINDOW`.
+REST book reads: **0**. Native frames: 47; native message objects: 2 initial books,
+8 price changes and 38 unrelated new-market announcements. Initial books were
+267.012 seconds old and remained STALE. Later native changes had source-to-receipt
+age 16–21 ms, but confirmed only YES no-bid / 0.001 ask and NO 0.999 bid / no-ask.
+Sentinel 0/1 prices did not become executable quotes or a fabricated midpoint.
+No full fresh PRICE baseline was established for either side. PRICE/LAMP events,
+queue entries and delivery attempts: **0**.
+
+The controlled AWC timeout is explicitly tagged and made **no first HTTP request**.
+The next scheduled fetch started **300.323 seconds** later, used the real AWC
+interface, returned HTTP200 in 580 ms and was committed by the main SQLite writer.
+Latest KSEA METAR: 03:53 UTC November 15 (19:53 Seattle November 14), **13.9°C**;
+at observation end its age was about 9.24 minutes and the existing weather context
+was FRESH / provider OK. This proves the controlled timeout-to-real-response path;
+it does not identify the network cause of the earlier genuine timeout.
+
+Closed SQLite: **118,784 bytes**; pre-close data-directory accounting: **693,468
+bytes**, not a sampled peak. Gzip wire capture: **14,035 bytes**, representing
+118,579 uncompressed bytes. The 14 copied artifacts total 374,923 bytes. All
+artifact, raw-input, Gamma/AWC/LAMP body and capture SHA checks pass. SQLite
+integrity `ok`, foreign-key errors 0, schema 1. Two cold replays agree and match
+the original event semantics/counts: no events or queue entries. Original source
+SQLite and wire hashes remain unchanged.
+
+Verdict: **WebSocket-first lifecycle PASS; controlled AWC recovery PASS; complete
+fresh quote qualification PARTIAL.** No real alert existed to preview. The native
+updates were current, but this one-sided contract could not prove a usable
+midpoint, a genuine notification or Telegram delivery. No freshness, strategy or
+deduplication rule was weakened to manufacture PASS.
+
+Evidence remains outside Git under `evidence/ws-first-20261115/`. Source SQLite
+SHA256: `2ef65e05851c5d139d2070b287d468bdf74c026c24502cdab40e02dbe599faeb`;
+gzip capture SHA256: `a84a93111de35810f8e8bfc96e0f46cd3e25d98caf4b4a0a21d5ae4b7c27ef86`.
