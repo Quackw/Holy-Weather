@@ -61,7 +61,7 @@ def test_pipeline_original_times_checkpoint_expiry_restart(cfg,market,make_raw):
 
 def test_zero_tolerance_preserves_accepted_rule_hash():
     cfg=Config()
-    excluded=('data_dir','duration_seconds','max_reconnects','weather_context','lamp_context','price_alert_enabled','lamp_alert_enabled','lamp_peak_change_f','alert_queue_enabled','telegram_enabled','source_clock_tolerance_ms')
+    excluded=('data_dir','duration_seconds','max_reconnects','weather_context','lamp_context','price_alert_enabled','lamp_alert_enabled','lamp_peak_change_f','alert_queue_enabled','telegram_enabled','price_notification_filter','source_clock_tolerance_ms')
     assert cfg.rule_hash()==sha({k:v for k,v in asdict(cfg).items() if k not in excluded})
 
 
