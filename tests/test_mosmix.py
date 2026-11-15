@@ -41,3 +41,20 @@ def test_exact_forecast_point_for_each_city(city):
     assert f['alert_enabled'] is False
     with pytest.raises(ValueError,match='IDENTITY'):
         decode(body(point='WRONG'),station=station,requested_ms=AT-1,received_ms=AT,at_ms=AT)
+
+
+def test_truncated_forecast_never_claims_complete_remaining_peak():
+    f=run(body())
+    assert f['remaining_coverage']=='INCOMPLETE'
+    assert f['complete_future_peak_c'] is None
+    assert f['future_peak_c']=='11.00'  # Original available points remain intact.
+    assert len(f['missing_remaining_hours'])==9
+
+
+def test_full_remaining_day_and_missing_temperature():
+    times=tuple(f'2026-11-15T{hour:02d}:00:00Z' for hour in range(13,24))
+    f=run(body(times=times,values=' '.join(['283.15']*11)))
+    assert f['remaining_coverage']=='COMPLETE'
+    assert f['complete_future_peak_c']=='10.00'
+    f=run(body(times=times,values=' '.join(['283.15']*10+['-'])))
+    assert f['remaining_coverage']=='INCOMPLETE' and f['complete_future_peak_c'] is None

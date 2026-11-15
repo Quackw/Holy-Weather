@@ -67,3 +67,11 @@ A read-only check of the existing test host `v2202609428928530766` on
 15 November at 14:08 UTC returned `NTP=yes`, `NTPSynchronized=yes`, timezone UTC.
 This does not itself establish exchange-clock agreement; native-stream
 qualification is still required. No clock settings or services were changed.
+
+## Remaining forecast coverage
+
+MOSMIX decoding now reports `remaining_coverage`, missing future UTC hours and
+`complete_future_peak_c`. A valid but truncated bulletin retains its original
+available-point peak, but cannot claim a complete remaining-day peak. Missing
+TTT points likewise prevent complete coverage. This qualification does not
+activate forecast alerts or establish a source-age policy.

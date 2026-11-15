@@ -1,5 +1,5 @@
 """Bounded original DWD point forecast decoder; not wired to live alerts yet."""
-from datetime import datetime,timezone
+from datetime import datetime,timezone,timedelta
 from decimal import Decimal
 import io
 import zipfile
@@ -57,6 +57,15 @@ def decode(body,*,station,requested_ms,received_ms,at_ms):
         hours.append({'valid_ms':ms,'temperature_c':str(temp) if temp is not None else None})
     day=datetime.fromtimestamp(at_ms/1000,ZoneInfo(STATIONS[station][1])).date()
     remaining=[h for h in hours if h['valid_ms']>at_ms and datetime.fromtimestamp(h['valid_ms']/1000,ZoneInfo(STATIONS[station][1])).date()==day]
+    # A truncated bulletin can contain valid hourly points yet omit the later
+    # peak. Distinguish its available-point maximum from complete-day coverage.
+    zone=ZoneInfo(STATIONS[station][1])
+    midnight=datetime.combine(day+timedelta(days=1),datetime.min.time(),zone)
+    end_ms=int(midnight.timestamp()*1000)
+    expected=list(range((at_ms//3600000+1)*3600000,end_ms,3600000))
+    covered={h['valid_ms'] for h in remaining if h['temperature_c'] is not None}
+    missing=[t for t in expected if t not in covered]
+    coverage='NO_REMAINING_HOURS' if not expected else 'INCOMPLETE' if missing else 'COMPLETE'
     peak=max((Decimal(h['temperature_c']) for h in remaining),default=None) if remaining and all(h['temperature_c'] is not None for h in remaining) else None
     # No freshness policy is invented here: readiness needs a separate reviewed
     # source-specific policy, not the LAMP two-hour limit or HTTP receipt time.
@@ -65,4 +74,6 @@ def decode(body,*,station,requested_ms,received_ms,at_ms):
             'sha256':sha(body),'status':'DECODED' if values else 'MISSING_TTT',
             'hours':hours,'remaining_hours':remaining,'freshness':'NOT_QUALIFIED',
             'future_peak_c':str(peak) if peak is not None else None,
+            'remaining_coverage':coverage,'missing_remaining_hours':missing,
+            'complete_future_peak_c':str(peak) if peak is not None and coverage=='COMPLETE' else None,
             'alert_enabled':False}
