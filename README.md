@@ -26,8 +26,7 @@ separate event/deduplication state and short English cards. Authorized TEST send
 and two real Amsterdam PRICE deliveries have been confirmed; this does not imply
 permanent deployment. PR #5 remains historical groundwork, not the current queue.
 
-**Current work: stage 0 audit, then PRICE acceptance first.** PRs #12–14 are draft;
-#14 depends on #12, while #13 source research is deferred. See
+**PR #12 is accepted and merged; stages 0 and 1 accepted.** PR #14 targets the cleaned main and remains unmerged; PR #13 source research is deferred. See
 [verified acceptance order](docs/PRICE_ACCEPTANCE_ORDER.md). No forecast expansion
 or next stage begins automatically. Existing explicitly authorized finite runs
 are separate from main and from production readiness.
@@ -247,8 +246,17 @@ require separate permission before sending. No production deployment.
 
 Ten verified European cities plus Ankara use Celsius PRICE + AWC context;
 exact stations and time zones are listed in docs/EUROPE_READINESS.md.
-Original DWD MOSMIX point forecasts have a bounded research decoder; European
-forecast alerts are not connected or freshness-qualified yet. NOAA LAMP is
+MOSMIX experiments are preserved on `codex/europe-weather-experiments-preserved`
+and are excluded from this PRICE foundation. European forecast alerts remain deferred. NOAA LAMP is
 explicitly rejected for these cities. See [EUROPE_READINESS.md](docs/EUROPE_READINESS.md).
 No European production deployment. Separately authorized finite PRICE experiments
 have sent real cards; these are not forecast qualification or permanent readiness.
+
+## Finite European PRICE catalogue (PR14 candidate)
+
+The candidate `holy_weather.catalogue` reuses the PRICE detector and one durable
+queue for verified European contracts. It adds bounded grouped subscriptions,
+per-side baselines, 100 ms maximum source-clock allowance and finite gap recovery.
+See [review](docs/PRICE_GROUP_RECOVERY_REVIEW.md) and
+[clock evidence](docs/PRICE_CLOCK_ORDER_REVIEW.md). No permanent service, weather
+experiments, next-day rollover or production deployment are included.

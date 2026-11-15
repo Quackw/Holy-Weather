@@ -1,3 +1,5 @@
+> Historical stage-0 snapshot. Stages 0/1 are now accepted; current PR12 scope and evidence are in EUROPE_READINESS.md. PR14 remains unmerged.
+
 # Stage 0 audit and stage 1 preparation — 15 November 2026
 
 Scope: documentation and acceptance planning only. No runtime edits, merge,
@@ -96,7 +98,7 @@ restart. Do not loosen source-order checks merely to hide reorder suppressions.
 ## Gaps that prevent permanent PRICE READY
 
 At the stage-0 snapshot (later stage-1 changes are recorded in
-PRICE_GROUP_RECOVERY_REVIEW.md):
+[PR14 recovery review](https://github.com/Quackw/Holy-Weather/pull/14)):
 
 The catalogue is Europe-only, while accepted US monitoring remains single-market;
 all-city US catalogue support is not already implemented. Catalogue network gaps

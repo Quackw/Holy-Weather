@@ -3,7 +3,7 @@
 Scope: every verified open v1 temperature bucket of London/EGLC, Paris/LFPB,
 Amsterdam/EHAM, Munich/EDDM, Milan/LIMC, Madrid/LEMD, Warsaw/EPWA,
 Helsinki/EFHK, Moscow/UUWW, Istanbul/LTFM and Ankara/LTAC. No weather or forecast
-HTTP calls. No forecast readiness or trading claim. Depends on draft PR #12.
+HTTP calls. No forecast readiness or trading claim. Based on accepted PR #12 (main 0a4f3e4).
 
 One bounded process, native WebSocket, SQLite writer and durable Telegram sender.
 Existing PRICE thresholds and baseline behavior are reused. Catalogue identities

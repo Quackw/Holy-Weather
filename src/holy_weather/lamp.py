@@ -47,10 +47,7 @@ def fetch_lamp(*,station='KLGA',fetch=urlopen,clock=millis):
         return dict(source=source,requested_ms=requested,received_ms=clock(),http=exc.code,
                     status='ACCESS_DENIED' if exc.code in (401,403,429) else 'HTTP_ERROR',terminal=True)
     except (OSError,URLError,UnicodeError,ValueError)as exc:
-        timed_out=isinstance(exc,TimeoutError) or (isinstance(exc,URLError) and isinstance(exc.reason,TimeoutError))
-        return dict(source=source,requested_ms=requested,received_ms=clock(),status='NETWORK_OR_DECODE_ERROR',
-                    error=type(exc).__name__,terminal=not timed_out,
-                    retry_policy='NEXT_SCHEDULED_POLL' if timed_out else 'NO_RETRY')
+        return dict(source=source,requested_ms=requested,received_ms=clock(),status='NETWORK_OR_DECODE_ERROR',error=type(exc).__name__,terminal=True)
 
 
 def decode(receipt,market,available_ms):

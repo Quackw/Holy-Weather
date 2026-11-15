@@ -65,9 +65,9 @@ finite-loop changes. Stage 1 clock/order result is in PRICE_CLOCK_ORDER_REVIEW.m
 
 ## Acceptance boundary
 
-READY FOR REVIEW for the stage-1 finite PRICE implementation. PR 14 remains based
-on draft PR 12: do not merge it before accepting the PRICE foundation and checking
-the retargeted diff/CI. This is not permanent-operation readiness or full city
+READY FOR REVIEW for the stage-1 finite PRICE implementation. PR 12 is accepted; PR 14 is reconciled with the cleaned main.
+The retargeted diff excludes deferred weather experiments. Do not merge PR 14
+without separate acceptance. This is not permanent-operation readiness or full city
 readiness. In an actual disconnected interval unknown market movement cannot be
 reconstructed. No guarantee of zero missed signals during a gap is made; baseline
 recovery intentionally suppresses inferred crossings across that interval.
