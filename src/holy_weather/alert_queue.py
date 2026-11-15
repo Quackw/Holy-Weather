@@ -47,13 +47,25 @@ def card(event,market,at):
 
 def enqueue(store,event_id,event,market,at):
     """Called in the same transaction as its originating event."""
-    if not store.cfg.alert_queue_enabled:return
+    row=store.c.execute('select payload from events where id=?',(event_id,)).fetchone()
+    if not row:raise ValueError('DELIVERY_EVENT_MISSING')
+    saved=json.loads(row[0])
+    # A previous refusal is final: never backfill it when capacity reappears.
+    if 'delivery_admission' in saved:return
+    def admission(status,reason):
+        saved['delivery_admission']=dict(status=status,reason=reason,at_ms=at)
+        store.c.execute('update events set payload=? where id=?',(canonical(saved),event_id))
+    if not store.cfg.alert_queue_enabled:
+        admission('NOT_QUEUED','QUEUE_DISABLED');return
     key=PREFIX+sha([TARGET,event['type'],event_id])
     if store.c.execute('select 1 from meta where key=?',(key,)).fetchone():return
-    count=store.c.execute('select count(*) from meta where key like ?',(PREFIX+'%',)).fetchone()[0]
+    # Keep final receipts for audit/dedupe; only unresolved work consumes slots.
+    # Unknown/malformed statuses remain capacity-consuming (fail closed).
+    count=store.c.execute("select count(*) from meta where key like ? and coalesce(json_extract(value,'$.status'),'') not in ('SENT','REJECTED','EXPIRED')",(PREFIX+'%',)).fetchone()[0]
     if count>=LIMIT:
         # Event remains durable; fail closed on delivery without stopping capture.
-        store.c.execute("insert or replace into meta values('alert_queue_status',?)",(canonical({'status':'FULL','limit':LIMIT}),));return
+        store.c.execute("insert or replace into meta values('alert_queue_status',?)",(canonical({'status':'FULL','limit':LIMIT,'at_ms':at}),))
+        admission('NOT_QUEUED','QUEUE_FULL');return
     html,expires=card(event,market,at)
     if event['type']=='PRICE_ALERT':expires=min(event['current']['source_ms'],event['current']['received_ms'])+store.cfg.quote_age_seconds*1000
     # Keep the contract-day limit valid between claim and the final HTTP check.
@@ -61,6 +73,8 @@ def enqueue(store,event_id,event,market,at):
     value=dict(status='PENDING',track=event['type'],event_id=event_id,event_ms=at,html=html,
                expires_ms=expires,target=TARGET,market_date=market['date'],timezone=market['timezone'])
     store.c.execute('insert into meta values(?,?)',(key,canonical(value)))
+    admission('QUEUED','ACCEPTED')
+    store.c.execute("delete from meta where key='alert_queue_status'")
 
 
 def preview(store,key,*,test=False):
