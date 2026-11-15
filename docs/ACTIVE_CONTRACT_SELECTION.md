@@ -126,3 +126,43 @@ The source commit passed all **266** offline tests and Linux GitHub Actions
 [run 43682446529](https://github.com/Quackw/Holy-Weather/actions/runs/43682446529).
 This evidence-only update does not change the tested application code. PR #11
 remains open and unmerged.
+
+## Follow-up: current-day METAR and quotes, 15 November 2026
+
+At the user's request, one further isolated qualification reused the exact
+already-transferred application files and dependencies. No application code was
+changed or retransferred. The controller verified all 16 source-file hashes
+before copying them into `/var/tmp/holy-weather-metar-quotes-v3qad05s`.
+Manifest: `2876713d56b02a9cb07ac148bb9a166ee1e405afaf637fea956bd836c173977c`.
+Raw receipts, frames, immutable final receipt and offline analyses remain outside
+Git in `evidence/metar-quotes-20261115/`. The earlier PARTIAL run is preserved.
+
+| Check | Real observed result |
+| --- | --- |
+| Selection | Same New York/KLGA 50–51°F contract; 11 verified candidates; selection in 13.355 seconds |
+| Observation | New connection, 07:48:13.196–07:50:14.223 UTC; 120-second collection window plus shutdown; COMPLETED_WINDOW |
+| AWC | One real HTTP 200 response in 261 ms; no injected failure or retry |
+| Current-day METAR | KLGA, 15 November, 06:51 UTC / 01:51 EST; 6.7°C = 44.06°F |
+| Receipt and availability | Received 07:48:13.599 UTC; available to the SQLite writer 07:48:14.371 UTC |
+| Causal joint snapshot | 07:48:14.718 UTC / 02:48:14.718 EST, after weather receipt and availability; both token observations READY |
+| Prices in that snapshot | YES bid 75¢ / ask 78¢; NO bid 22¢ / ask 25¢; quote source age 2.106 seconds |
+| Weather age | 57.245 minutes at the snapshot, FRESH under the unchanged 90-minute hourly-observation context limit; this is distinct from the unchanged 90-second quote limit |
+| Received observed maximum | 6.7°C among received observations on the current local day; not official daily Tmax |
+| Continuing native confirmations | 2 books and 34 depth messages, 35 own-token confirmations per side; subsequent source-to-receipt delay 13–24 ms; last source age 9.551 seconds at end |
+| Events / queue / Telegram | 0 / 0 / 0; both native midpoints stayed at 76.5¢ and 23.5¢, so no upward threshold crossing occurred |
+| Storage | 12 saved samples, 58 coalesced confirmations; SQLite 106,496 bytes; observation capture 7,169 bytes gzip / 48,875 bytes raw |
+| Integrity and replay | All 16 returned artifact SHA values verified, SQLite integrity ok, zero foreign-key errors, unchanged schema v1; two cold selector replays and two cold observation replays agree |
+
+**PASS for the bounded current-day weather/quote qualification.** The joint
+informational snapshot is explicitly reconstructed from captured real arrivals;
+it is not presented as a PRICE/LAMP alert. Its weather and price input references
+were also checked against the original live SQLite. Weather arrived before the
+snapshot; no later METAR was inserted retrospectively. The hourly METAR's
+observation time is kept distinct from its later HTTP receipt time.
+
+The underlying source is unchanged from the 266-test, green Linux-CI version.
+The run created no real alert to preview or send, used no REST books or
+reconnects, and changed no production files, services or historical inputs. The
+finite connection is closed and its persisted connection status is correctly
+CONNECTION_UNCONFIRMED. PASS does not claim continuous operation, live Telegram
+delivery or trading benefit. No additional run or next stage was started.
