@@ -138,25 +138,9 @@ def observe(cfg, *, connect=None, stop=None, weather_fetch=None, lamp_fetch=None
                 lamp=LampPoller(lamp_fetch or (lambda: fetch_lamp(station=market['station'])))
                 lamp.source=lamp_source(market['station'])
             initial_bytes=store.usage();initial_writes=disk_write_bytes();started=time.monotonic();attempt=0
-            def context_tick():
-                nonlocal reason
-                if stop.is_set() or time.monotonic()>=deadline:return
-                at=millis()
-                if datetime.now(timezone.utc).astimezone(ZoneInfo(market['timezone'])).date().isoformat()!=market['date']:
-                    reason='MARKET_LOCAL_DATE_ENDED';stop.set();return
-                if weather:weather.tick(store,market,at)
-                if lamp:lamp.tick(store,market,at)
-
-            def context_wait(seconds):
-                until=min(deadline,time.monotonic()+seconds)
-                while not stop.is_set() and time.monotonic()<until:
-                    context_tick()
-                    stop.wait(min(.05,max(0,until-time.monotonic())))
-                context_tick()
-
             while not stop.is_set() and time.monotonic()<deadline:
-                context_tick()
-                if stop.is_set() or time.monotonic()>=deadline:break
+                if datetime.now(timezone.utc).astimezone(ZoneInfo(market['timezone'])).date().isoformat()!=market['date']:
+                    reason='MARKET_LOCAL_DATE_ENDED';stop.set();break
                 try:
                     with connect(WS,proxy=None,open_timeout=10,close_timeout=2,ping_interval=10,ping_timeout=20,
                                  max_size=262144,max_queue=16,compression=None) as ws:
@@ -205,13 +189,9 @@ def observe(cfg, *, connect=None, stop=None, weather_fetch=None, lamp_fetch=None
                         reason='INVALID_OR_OVERSIZE_STREAM';exit_code=3;break
                     if attempt>=cfg.max_reconnects:
                         reason='BASELINE_RECOVERY_BUDGET_EXHAUSTED' if recovery else 'NETWORK_RECONNECT_BUDGET_EXHAUSTED';exit_code=5;break
-                    attempt+=1;counters['reconnects']+=1;context_wait(min(2**(attempt-1),max(0,deadline-time.monotonic())))
+                    attempt+=1;counters['reconnects']+=1;stop.wait(min(2**(attempt-1),max(0,deadline-time.monotonic())))
                 except WebSocketException as exc:
                     store.gap('PROTOCOL:'+type(exc).__name__,millis());reason='WEBSOCKET_PROTOCOL_ERROR';exit_code=3;break
-            # Exhausted price recovery does not cancel already-authorized context
-            # observation. No further WebSocket attempts; preserve its failure status.
-            if (weather or lamp) and reason in ('NETWORK_RECONNECT_BUDGET_EXHAUSTED','BASELINE_RECOVERY_BUDGET_EXHAUSTED'):
-                context_wait(max(0,deadline-time.monotonic()))
             elapsed=time.monotonic()-started
             if stop.is_set() and reason=='COMPLETED_WINDOW':
                 reason='SIGNAL_STOP'

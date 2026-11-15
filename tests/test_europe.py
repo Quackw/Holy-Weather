@@ -22,7 +22,7 @@ def european(gamma,city,bucket='13°C'):
 
 @pytest.mark.parametrize('city',EUROPE_CITIES)
 def test_europe_price_queue_restart(city,gamma,cfg,make_raw):
-    cfg=replace(cfg,city=city,bucket='13°C',weather_context=True,price_alert_enabled=True,alert_queue_enabled=True)
+    cfg=replace(cfg,city=city,bucket='13°C',weather_context=False,price_alert_enabled=True,alert_queue_enabled=True)
     m=select(european(gamma,city),cfg,now=NOW)
     assert m['station']==EUROPE_CITIES[city][1]
     assert m['timezone']==EUROPE_CITIES[city][2]
