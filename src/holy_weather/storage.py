@@ -378,14 +378,14 @@ class Store:
         with self.transaction():
             self.c.execute('insert or replace into meta values(?,?)', (key, canonical(value)))
 
-    def reject(self, raw, reason, at, token=None):
+    def reject(self, raw, reason, at, token=None, *, invalidate_state=True):
         value=canonical(raw).encode()
         if len(value)>262144:
             value=canonical({'rejected_sha256':sha(value),'reason':'REJECTED_INPUT_TOO_LARGE'}).encode()
         with self.transaction():
             self.c.execute('insert or ignore into inputs(identity,received_ms,raw,raw_sha) values(?,?,?,?)',
                            (sha(value),at,zlib.compress(value,3),sha(value)))
-        self.invalidate('INVALID_INPUT:'+reason,at,token)
+        if invalidate_state:self.invalidate('INVALID_INPUT:'+reason,at,token)
 
     def stats(self, *, now_ms=None):
         now_ms=int(time.time()*1000) if now_ms is None else now_ms
