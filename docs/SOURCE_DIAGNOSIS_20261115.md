@@ -103,3 +103,8 @@ fresh complete native quotes and the old cross-source difference remain pending.
 
 Existing real artifacts remain in ignored evidence directories with their
 original SHA. Synthetic regression success is not a live-source acceptance.
+
+The pre-connection REST gate is superseded by the
+[WebSocket-first qualification](WEBSOCKET_FIRST_QUALIFICATION.md). Its explicit
+finite wait accepts only genuinely fresh native baselines and tests a clearly
+labelled controlled AWC timeout followed by the next scheduled real request.

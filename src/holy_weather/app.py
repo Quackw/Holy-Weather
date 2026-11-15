@@ -99,7 +99,11 @@ def process(raw, received_ms, market, store, counters):
                 raise ValueError('INVALID_INPUT_BUDGET_EXHAUSTED')
 
 
-def observe(cfg, *, connect=None, stop=None, weather_fetch=None, lamp_fetch=None, telegram_transport=None):
+def observe(cfg, *, connect=None, stop=None, weather_fetch=None, lamp_fetch=None, telegram_transport=None,
+            baseline_wait_seconds=None):
+    if baseline_wait_seconds is not None and (type(baseline_wait_seconds)is not int or not 1<=baseline_wait_seconds<=cfg.duration_seconds):
+        raise ValueError('BASELINE_WAIT_MUST_FIT_OBSERVATION_WINDOW')
+    baseline_wait=BASELINE_RECOVERY_SECONDS if baseline_wait_seconds is None else baseline_wait_seconds
     if connect is None:
         from websockets.sync.client import connect
     from websockets.exceptions import ConnectionClosed, InvalidStatus, WebSocketException
@@ -138,7 +142,7 @@ def observe(cfg, *, connect=None, stop=None, weather_fetch=None, lamp_fetch=None
                             if sender:sender.tick(store,millis())
                             if weather:weather.tick(store,market,millis())
                             if lamp:lamp.tick(store,market,millis())
-                            if store.recovery_due(BASELINE_RECOVERY_SECONDS):
+                            if store.recovery_due(baseline_wait):
                                 raise BaselineRecoveryTimeout('BASELINE_NOT_CONFIRMED')
                             if time.monotonic()>=next_stats:
                                 health=store.observation_snapshot()['observation']['state']
@@ -185,7 +189,8 @@ def observe(cfg, *, connect=None, stop=None, weather_fetch=None, lamp_fetch=None
             result={'state':reason,'exit_code':exit_code,'elapsed_seconds':elapsed,'market':{k:v for k,v in market.items() if k!='rules'},
                     'counters':dict(counters),'storage':store.stats(),'growth_since_discovery_bytes':max(0,store.usage()-initial_bytes),
                     'process_disk_write_bytes':written-initial_writes if written is not None and initial_writes is not None else None,
-                    'weather_context_enabled':cfg.weather_context, 'lamp_context_enabled':cfg.lamp_context, 'own_model_or_trading_implemented':False}
+                    'weather_context_enabled':cfg.weather_context, 'lamp_context_enabled':cfg.lamp_context,
+                    'baseline_wait_seconds':baseline_wait,'own_model_or_trading_implemented':False}
             result['data_state']=result['storage']['observation']['state']
             if result['storage']['sqlite_integrity']!='ok' or result['storage']['foreign_key_errors']:
                 result.update(state='STORAGE_INTEGRITY_FAILURE',exit_code=4)
