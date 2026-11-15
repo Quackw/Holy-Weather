@@ -64,6 +64,7 @@ class Config:
     data_dir: str = 'data'
     storage_bytes: int = 256 * 1024 * 1024
     quote_age_seconds: int = 90
+    source_clock_tolerance_ms: int = 0
     move: str = '0.10'
     window_seconds: int = 900
     levels: tuple = ('0.50', '0.70', '0.90')
@@ -96,7 +97,7 @@ class Config:
         if self.city not in CITIES or not isinstance(self.bucket, str) or not 1 <= len(self.bucket) <= 80:
             raise ValueError('CITY_OR_BUCKET')
         limits = {'duration_seconds': (1, 3600), 'storage_bytes': (8*1024*1024, 256*1024*1024),
-                  'quote_age_seconds': (1, 90), 'window_seconds': (1, 3600), 'cooldown_seconds': (0, 3600), 'max_reconnects': (0, 5)}
+                  'quote_age_seconds': (1, 90), 'source_clock_tolerance_ms': (0, 100), 'window_seconds': (1, 3600), 'cooldown_seconds': (0, 3600), 'max_reconnects': (0, 5)}
         for key, (low, high) in limits.items():
             value = getattr(self, key)
             if type(value) is not int or not low <= value <= high:
@@ -129,7 +130,21 @@ class Config:
         return self.date or now.astimezone(ZoneInfo(CITIES[self.city][2])).date().isoformat()
 
     def rule_hash(self):
-        return sha({k: v for k, v in asdict(self).items() if k not in ('data_dir', 'duration_seconds', 'max_reconnects', 'weather_context', 'lamp_context', 'price_alert_enabled', 'lamp_alert_enabled', 'lamp_peak_change_f', 'alert_queue_enabled', 'telegram_enabled')})
+        rules={k: v for k, v in asdict(self).items() if k not in ('data_dir', 'duration_seconds', 'max_reconnects', 'weather_context', 'lamp_context', 'price_alert_enabled', 'lamp_alert_enabled', 'lamp_peak_change_f', 'alert_queue_enabled', 'telegram_enabled')}
+        # Preserve accepted configurations/database hashes when tolerance is off.
+        if not self.source_clock_tolerance_ms:rules.pop('source_clock_tolerance_ms')
+        return sha(rules)
+
+
+def quote_clock_status(cfg, source_ms, received_ms, at_ms):
+    """Original clocks remain immutable; receipt age never borrows clock tolerance."""
+    lead=source_ms-received_ms
+    if received_ms>at_ms:return 'CLOCK_UNVERIFIED'
+    if lead>cfg.source_clock_tolerance_ms or source_ms-at_ms>cfg.source_clock_tolerance_ms:
+        return 'FUTURE'
+    if max(at_ms-source_ms,at_ms-received_ms)>cfg.quote_age_seconds*1000:
+        return 'STALE'
+    return 'FRESH'
 
 
 def normalize(message, received_ms, market, *, change=None):
@@ -203,8 +218,8 @@ def evolve(previous, sample, cfg):
     state = deepcopy(previous or {'points': [], 'excursion': None, 'last_source': None, 'gates': {}})
     if sample['kind'] == 'last_trade_price':
         return state, [], 'TRADE_RECORDED'
-    age = sample['received_ms'] - sample['source_ms']
-    status = ('FUTURE' if age < 0 else 'STALE' if age > cfg.quote_age_seconds*1000 else
+    clock_status=quote_clock_status(cfg,sample['source_ms'],sample['received_ms'],sample['received_ms'])
+    status = (clock_status if clock_status!='FRESH' else
               'MISSING_ASK' if sample['ask'] is None else
               'OUT_OF_ORDER' if sample['source_ms'] < max(x for x in (state.get('high_source'),state.get('last_source'),-1) if x is not None) else 'FRESH')
     if status != 'FRESH':

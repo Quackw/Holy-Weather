@@ -63,3 +63,41 @@ This uses the official dynamic subscription protocol:
 https://docs.polymarket.com/market-data/realtime-data (market stream subscription).
 No frame/storage/freshness limit is raised. Until a token receives its native
 full quote, it remains without a confirmed baseline and cannot alert.
+
+
+## Bounded source-clock disagreement (candidate, user requested)
+
+The accepted single-market configuration still defaults to strict zero tolerance.
+The new catalogue explicitly uses `source_clock_tolerance_ms = 100` (hard maximum
+100 ms). This accommodates the measured 1–54 ms source lead without changing
+PRICE thresholds, prices, source timestamps, receipt timestamps or the 90-second
+freshness limit. It is an engineering tolerance, not a measured clock correction.
+A source lead above 100 ms is still FUTURE. Reversed source/receipt order, GAP,
+restart and missing top-of-book still prevent a crossing. Receipt age is checked
+independently; expiry is `min(source_ms, received_ms) + 90000`, so tolerance cannot
+extend the message's lifetime. Accepted small leads remain explicit in event
+clock evidence and quote snapshots. No clocks on Mac or server are changed.
+
+Zero-tolerance configs retain their accepted rule hash. A nonzero value is pinned
+in the hash: changing it on an existing directory is refused, preserving old
+history. No database migration. Test rollback preserves new evidence and changes
+only which code/config is invoked; never rewrite an old session as tolerant.
+
+Real retained-message replay, same 40590 original messages in both modes:
+
+| Measure | Strict 0 ms | Bounded 100 ms |
+| --- | ---: | ---: |
+| Saved samples | 73340 | 9280 |
+| FUTURE samples | 72216 | 0 |
+| PRICE events | 0 | 1 |
+| Closed SQLite bytes | 56270848 | 7479296 |
+
+Both integrity checks passed, foreign-key errors zero, original source database
+SHA unchanged. This replays retained messages, not the omitted/coalesced full
+wire stream. The detected historical example is Amsterdam 9°C NO, midpoint
+49.5% to 50%, source leads 47 and 48 ms. It is not a new live notification and
+must not be sent retrospectively. The previous successful Telegram TEST cards
+proved transport/deduplication, not a special American clock policy.
+
+The earlier proposed server manifest `bfa60016…faadf01` predates this change and
+must not be used as the corrected package. No server execution or send occurred.

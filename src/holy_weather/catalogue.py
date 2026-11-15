@@ -22,6 +22,7 @@ PREFIX = 'price_catalogue_v1:'
 class CatalogueConfig(Config):
     city: str = 'london'
     bucket: str = 'catalogue'
+    source_clock_tolerance_ms: int = 100
     price_alert_enabled: bool = True
     alert_queue_enabled: bool = True
 

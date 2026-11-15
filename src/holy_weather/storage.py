@@ -7,7 +7,7 @@ from pathlib import Path
 import sqlite3
 import time
 import zlib
-from .core import canonical, evolve, reset, sha
+from .core import canonical, evolve, reset, sha, quote_clock_status
 
 APP_ID = 0x48574D31
 SCHEMA = '''
@@ -410,8 +410,11 @@ class Store:
             row['age_now_ms']=now_ms-row['source_ms']
             row['receipt_age_now_ms']=now_ms-row['received_ms']
             ages=(row['age_now_ms'],row['receipt_age_now_ms'])
-            row['freshness_now']=('CLOCK_UNVERIFIED' if min(ages)<0 or row['source_ms']>row['received_ms'] else
-                                  'STALE' if max(ages)>self.cfg.quote_age_seconds*1000 else 'FRESH')
+            clock_status=quote_clock_status(self.cfg,row['source_ms'],row['received_ms'],now_ms)
+            row['freshness_now']='CLOCK_UNVERIFIED' if clock_status=='FUTURE' else clock_status
+            if self.cfg.source_clock_tolerance_ms:
+                row['source_lead_ms']=row['source_ms']-row['received_ms']
+                row['source_clock_tolerance_ms']=self.cfg.source_clock_tolerance_ms
             row['quote_usable_now']=(row['kind']!='last_trade_price' and row['status']=='FRESH'
                                      and row['ask'] is not None and row['bid'] is not None and row['freshness_now']=='FRESH')
         market=self.c.execute('select payload from market where id=1').fetchone()
