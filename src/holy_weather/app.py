@@ -139,6 +139,8 @@ def observe(cfg, *, connect=None, stop=None, weather_fetch=None, lamp_fetch=None
                 lamp.source=lamp_source(market['station'])
             initial_bytes=store.usage();initial_writes=disk_write_bytes();started=time.monotonic();attempt=0
             while not stop.is_set() and time.monotonic()<deadline:
+                if datetime.now(timezone.utc).astimezone(ZoneInfo(market['timezone'])).date().isoformat()!=market['date']:
+                    reason='MARKET_LOCAL_DATE_ENDED';stop.set();break
                 try:
                     with connect(WS,proxy=None,open_timeout=10,close_timeout=2,ping_interval=10,ping_timeout=20,
                                  max_size=262144,max_queue=16,compression=None) as ws:

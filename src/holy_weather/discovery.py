@@ -5,9 +5,23 @@ import re
 from urllib.parse import urlencode, urlparse, parse_qs
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
-from .core import CITIES, sha
+from .core import CITIES, EUROPE_CITIES, sha
 
 GAMMA = 'https://gamma-api.polymarket.com/events'
+
+
+# Normalized full rules text reviewed across all 121 European contracts.
+# Only airport label, explicit observation date, source URL and whitespace vary.
+EUROPE_RULES_SHA256='20a5e271ce88c0abd4345a1f383bc42ca598c2625ce53f3272197d64933ff569'
+
+
+def verify_europe_rules(description,station,stamp,source):
+    match=re.match(r'This market will resolve to the temperature range that contains the highest temperature reported at (.+?) on '+re.escape(stamp)+r'\.',description)
+    if not match or not match[1].endswith('('+station+')'):
+        raise ValueError('UNREVIEWED_EUROPE_RULE_TEMPLATE')
+    normalized=description.replace(match[1],'{AIRPORT}').replace(source,'{SOURCE}').replace(stamp,'{DATE}')
+    if sha(' '.join(normalized.split()).encode())!=EUROPE_RULES_SHA256:
+        raise ValueError('UNREVIEWED_EUROPE_RULE_TEMPLATE')
 
 
 def select(document, cfg, *, now):
@@ -37,12 +51,21 @@ def select(document, cfg, *, now):
     parsed = urlparse(source)
     if parsed.scheme != 'https' or parsed.netloc != 'aviationweather.gov' or parsed.path != '/api/data/metar' or parse_qs(parsed.query).get('ids') != [station]:
         raise ValueError('UNSUPPORTED_RESOLUTION_SOURCE_OR_STATION')
-    required = (station, 'routine', 'METAR', 'local time', 'Fahrenheit', 'rounded to the nearest whole degree')
+    unit = 'Celsius' if cfg.city in EUROPE_CITIES else 'Fahrenheit'
+    required = (station, 'routine', 'METAR', 'local time', unit, 'rounded to the nearest whole degree')
+    if cfg.city in EUROPE_CITIES:
+        # Reject contradictory airport references even when the expected ICAO
+        # is also present elsewhere in the rules or in the source URL.
+        if set(re.findall(r'\(([A-Z]{4})\)',description)) != {station}:
+            raise ValueError('EUROPE_RULE_STATION_CONFLICT')
+        if 'whole degrees Celsius' not in description or 'whole Fahrenheit' in description or not re.fullmatch(r'-?\d+°C(?: or (?:below|higher))?',cfg.bucket):
+            raise ValueError('UNREVIEWED_CELSIUS_BUCKET_OR_RULES')
     if not all(x in description for x in required) or 'half rounded up' not in description:
         raise ValueError('UNREVIEWED_RULES')
     stamp = f"{date.day} {months[date.month-1][:3].title()} '{date.year%100:02d}"
     if stamp not in description:
         raise ValueError('RULE_DATE_MISMATCH')
+    if cfg.city in EUROPE_CITIES:verify_europe_rules(description,station,stamp,source)
     condition = m.get('conditionId', '')
     if not re.fullmatch(r'0x[a-fA-F0-9]{64}', condition):
         raise ValueError('INVALID_CONDITION')

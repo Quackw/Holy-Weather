@@ -400,7 +400,7 @@ class Store:
             row['freshness_now']=('CLOCK_UNVERIFIED' if min(ages)<0 or row['source_ms']>row['received_ms'] else
                                   'STALE' if max(ages)>self.cfg.quote_age_seconds*1000 else 'FRESH')
             row['quote_usable_now']=(row['kind']!='last_trade_price' and row['status']=='FRESH'
-                                     and row['ask'] is not None and row['freshness_now']=='FRESH')
+                                     and row['ask'] is not None and row['bid'] is not None and row['freshness_now']=='FRESH')
         market=self.c.execute('select payload from market where id=1').fetchone()
         tokens=json.loads(market[0])['tokens'] if market else {}
         quotes={r['token']:r for r in result['latest'] if r['kind']!='last_trade_price'}

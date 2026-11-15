@@ -7,7 +7,7 @@ import time
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
-from .core import sha, CITIES
+from .core import sha, CITIES, US_CITIES
 from .weather import WeatherPoller, millis, station_check
 
 SOURCE='https://lamp.mdl.nws.noaa.gov/cgi-bin/getlav.pl?sta=KLGA'
@@ -27,7 +27,7 @@ class _Pre(HTMLParser):
 
 
 def source_for(station):
-    if station not in {v[1] for v in CITIES.values()}:raise ValueError('LAMP_STATION')
+    if station not in {v[1] for v in US_CITIES.values()}:raise ValueError('LAMP_STATION')
     return f'https://lamp.mdl.nws.noaa.gov/cgi-bin/getlav.pl?sta={station}'
 
 

@@ -3,7 +3,7 @@ from dataclasses import replace
 from datetime import datetime,timezone
 import json
 import pytest
-from holy_weather.core import CITIES,Config,sha
+from holy_weather.core import US_CITIES as CITIES,Config,sha
 from holy_weather.discovery import select
 from holy_weather import weather,lamp
 from holy_weather.storage import Store

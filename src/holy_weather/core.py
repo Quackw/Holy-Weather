@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-CITIES = {'new-york': ('nyc', 'KLGA', 'America/New_York'),
+US_CITIES = {'new-york': ('nyc', 'KLGA', 'America/New_York'),
           'atlanta': ('atlanta', 'KATL', 'America/New_York'),
           'seattle': ('seattle', 'KSEA', 'America/Los_Angeles'),
           'miami': ('miami', 'KMIA', 'America/New_York'),
@@ -22,6 +22,20 @@ CITIES = {'new-york': ('nyc', 'KLGA', 'America/New_York'),
           'houston': ('houston', 'KHOU', 'America/Chicago'),
           'los-angeles': ('los-angeles', 'KLAX', 'America/Los_Angeles'),
           'san-francisco': ('san-francisco', 'KSFO', 'America/Los_Angeles')}
+
+
+EUROPE_CITIES = {'london': ('london', 'EGLC', 'Europe/London'),
+                 'paris': ('paris', 'LFPB', 'Europe/Paris'),
+                 'amsterdam': ('amsterdam', 'EHAM', 'Europe/Amsterdam'),
+                 'munich': ('munich', 'EDDM', 'Europe/Berlin'),
+                 'milan': ('milan', 'LIMC', 'Europe/Rome'),
+                 'madrid': ('madrid', 'LEMD', 'Europe/Madrid'),
+                 'warsaw': ('warsaw', 'EPWA', 'Europe/Warsaw'),
+                 'helsinki': ('helsinki', 'EFHK', 'Europe/Helsinki'),
+                 'moscow': ('moscow', 'UUWW', 'Europe/Moscow'),
+                 'istanbul': ('istanbul', 'LTFM', 'Europe/Istanbul'),
+                 'ankara': ('ankara', 'LTAC', 'Europe/Istanbul')}
+CITIES = {**US_CITIES, **EUROPE_CITIES}
 
 
 def canonical(value):
@@ -66,6 +80,8 @@ class Config:
     telegram_enabled: bool = False
 
     def __post_init__(self):
+        if self.city in EUROPE_CITIES and self.lamp_context:
+            raise ValueError("LAMP_UNAVAILABLE_FOR_EUROPE")
         if type(self.alert_queue_enabled)is not bool or type(self.telegram_enabled)is not bool or (self.telegram_enabled and not self.alert_queue_enabled):
             raise ValueError("TELEGRAM_REQUIRES_ALERT_QUEUE")
         if type(self.lamp_alert_enabled)is not bool or (self.lamp_alert_enabled and (not self.lamp_context or self.city!="new-york")):
