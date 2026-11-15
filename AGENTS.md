@@ -14,3 +14,10 @@ This private project is independent of POLYMETEO. Accepted runtime PRs 1–4 rem
 - Tests are offline and synthetic in CI. Real evidence stays outside Git. Record provenance for research replay.
 - Run pytest, compile checks and the documented finite Linux/live qualification. Separate code, tests, live observation and scientific claims.
 - Stop on permission refusal or unknown write state. No credential/account fallback or silent limit increases.
+
+## Acceptance before declaring a city ready
+
+- Reproduce a reported defect before fixing it; retain an offline regression that fails on the old behavior. Check the producer, stored state, consumer and restart boundary, not just a helper function.
+- Keep rule/station/source verification, quote readiness, weather readiness, forecast readiness and delivery evidence separate. Green CI or HTTP 200 alone is not city readiness.
+- A city-added Telegram notice is permitted only after its applicable PRICE and forecast paths, current contract rules, native clocks, durable queue and restart/deduplication checks pass. Record the exact qualified revision and scope; never announce disabled or unqualified features as working.
+- Preserve the small existing architecture. Use bounded tests and the existing writer/queue; no new services, dependencies, storage limits or production rollout as a shortcut to acceptance.

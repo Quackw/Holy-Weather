@@ -10,6 +10,20 @@ from .core import CITIES, EUROPE_CITIES, sha
 GAMMA = 'https://gamma-api.polymarket.com/events'
 
 
+# Normalized full rules text reviewed across all 121 European contracts.
+# Only airport label, explicit observation date, source URL and whitespace vary.
+EUROPE_RULES_SHA256='20a5e271ce88c0abd4345a1f383bc42ca598c2625ce53f3272197d64933ff569'
+
+
+def verify_europe_rules(description,station,stamp,source):
+    match=re.match(r'This market will resolve to the temperature range that contains the highest temperature reported at (.+?) on '+re.escape(stamp)+r'\.',description)
+    if not match or not match[1].endswith('('+station+')'):
+        raise ValueError('UNREVIEWED_EUROPE_RULE_TEMPLATE')
+    normalized=description.replace(match[1],'{AIRPORT}').replace(source,'{SOURCE}').replace(stamp,'{DATE}')
+    if sha(' '.join(normalized.split()).encode())!=EUROPE_RULES_SHA256:
+        raise ValueError('UNREVIEWED_EUROPE_RULE_TEMPLATE')
+
+
 def select(document, cfg, *, now):
     slug_city, station, zone = CITIES[cfg.city]
     day = cfg.day(now)
@@ -51,6 +65,7 @@ def select(document, cfg, *, now):
     stamp = f"{date.day} {months[date.month-1][:3].title()} '{date.year%100:02d}"
     if stamp not in description:
         raise ValueError('RULE_DATE_MISMATCH')
+    if cfg.city in EUROPE_CITIES:verify_europe_rules(description,station,stamp,source)
     condition = m.get('conditionId', '')
     if not re.fullmatch(r'0x[a-fA-F0-9]{64}', condition):
         raise ValueError('INVALID_CONDITION')

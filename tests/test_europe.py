@@ -2,6 +2,7 @@
 from dataclasses import replace
 from datetime import datetime,timezone
 import json
+from pathlib import Path
 import pytest
 from holy_weather.core import Config,EUROPE_CITIES
 from holy_weather.discovery import select
@@ -14,7 +15,7 @@ def european(gamma,city,bucket='13°C'):
     slug,station,zone=EUROPE_CITIES[city]
     doc=json.loads(json.dumps(gamma).replace('nyc',slug).replace('KLGA',station))
     m=doc[0]['markets'][0];m['groupItemTitle']=bucket
-    m['description']=m['description'].replace('Fahrenheit is','whole degrees Celsius is')+' ('+station+')'
+    m['description']=(Path(__file__).parent/'fixtures/europe_rules_template.txt').read_text().replace('{AIRPORT}','Synthetic Airport ('+station+')').replace('{DATE}',"14 Nov '26").replace('{SOURCE}',m['resolutionSource'])
     m['slug']=m['slug'].replace('46-47f','13c')
     return doc
 
@@ -66,3 +67,25 @@ def test_rejects_conflicting_airport_in_rules(city,gamma,cfg):
     doc[0]['markets'][0]['description']+=' Airport (EGLL)'
     with pytest.raises(ValueError,match='RULE_STATION_CONFLICT'):
         select(doc,cfg,now=NOW)
+
+@pytest.mark.parametrize('before,after',[
+    ('SPECI is a special observation and does not count','SPECI counts'),
+    ('half rounded up','half rounded down'),
+    ('Weather Underground Daily Observations table','another source'),
+    ('whether or not it is marked as a correction (COR)','only if marked COR'),
+    ('11:59 PM ET','10:59 PM ET'),
+    ('the lowest bracket','the highest bracket'),
+    ('station\'s local time','UTC time'),
+])
+def test_europe_rejects_changed_settlement_contract(gamma,cfg,before,after):
+    doc=european(gamma,'london');text=doc[0]['markets'][0]['description']
+    assert before in text
+    doc[0]['markets'][0]['description']=text.replace(before,after)
+    with pytest.raises(ValueError):select(doc,replace(cfg,city='london',bucket='13°C'),now=NOW)
+
+
+def test_europe_rejects_appended_contradiction(gamma,cfg):
+    doc=european(gamma,'london')
+    doc[0]['markets'][0]['description']+=' SPECI observations count for settlement.'
+    with pytest.raises(ValueError,match='RULE_TEMPLATE'):
+        select(doc,replace(cfg,city='london',bucket='13°C'),now=NOW)
