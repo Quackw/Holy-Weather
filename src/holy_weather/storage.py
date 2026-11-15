@@ -7,7 +7,7 @@ from pathlib import Path
 import sqlite3
 import time
 import zlib
-from .core import canonical, evolve, reset, sha
+from .core import canonical, evolve, reset, sha, quote_clock_status
 
 APP_ID = 0x48574D31
 SCHEMA = '''
@@ -140,6 +140,19 @@ class Store:
             ident=self.c.execute('select id from inputs where identity=?',(identity,)).fetchone()[0]
             self.c.execute('insert or replace into latest values(?,?,?)',('__MARKET__','discovery',ident))
 
+    def market_for_token(self, token):
+        row=self.c.execute('select payload from market where id=1').fetchone()
+        market=json.loads(row[0]) if row else None
+        if not market or token not in market['tokens'].values():
+            raise StorageStop('TOKEN_WITHOUT_BOUND_MARKET')
+        return market
+
+    def discovery_reference(self, token):
+        return self.c.execute("select input_id from latest where token='__MARKET__' and kind='discovery'").fetchone()
+
+    def closed_key(self, sample):
+        return 'market_closed'
+
     def diagnostic(self, category, reason, at):
         with self.transaction():
             self.c.execute('insert into diagnostics(received_ms,category,reason) values(?,?,?)', (at, category, reason[:300]))
@@ -207,9 +220,9 @@ class Store:
                                  (sample['id'], sample['received_ms'], compressed, sha(raw)))
             input_id = cur.lastrowid
             if sample['kind'] == 'market_resolved':
-                self.c.execute("insert or replace into meta values('market_closed','true')")
+                self.c.execute("insert or replace into meta values(?,'true')",(self.closed_key(sample),))
                 return {'status': 'MARKET_RESOLVED', 'events': []}
-            if self.c.execute("select 1 from meta where key='market_closed'").fetchone():
+            if self.c.execute("select 1 from meta where key=?",(self.closed_key(sample),)).fetchone():
                 return {'status': 'AFTER_RESOLUTION', 'events': []}
             sample = dict(sample, input_id=input_id)
             row = self.c.execute('select payload from state where token=?', (sample['token'],)).fetchone()
@@ -244,7 +257,7 @@ class Store:
                 for price in event.get('prices',{}).values():
                     if price.get('input_id'):
                         self.c.execute('insert or ignore into event_inputs values(?,?)',(ident,price['input_id']))
-                discovery=self.c.execute("select input_id from latest where kind='discovery'").fetchone()
+                discovery=self.discovery_reference(sample['token'])
                 if discovery:self.c.execute('insert or ignore into event_inputs values(?,?)',(ident,discovery[0]))
             if self.cfg.price_alert_enabled:
                 from .price_alert import record
@@ -365,14 +378,14 @@ class Store:
         with self.transaction():
             self.c.execute('insert or replace into meta values(?,?)', (key, canonical(value)))
 
-    def reject(self, raw, reason, at, token=None):
+    def reject(self, raw, reason, at, token=None, *, invalidate_state=True):
         value=canonical(raw).encode()
         if len(value)>262144:
             value=canonical({'rejected_sha256':sha(value),'reason':'REJECTED_INPUT_TOO_LARGE'}).encode()
         with self.transaction():
             self.c.execute('insert or ignore into inputs(identity,received_ms,raw,raw_sha) values(?,?,?,?)',
                            (sha(value),at,zlib.compress(value,3),sha(value)))
-        self.invalidate('INVALID_INPUT:'+reason,at,token)
+        if invalidate_state:self.invalidate('INVALID_INPUT:'+reason,at,token)
 
     def stats(self, *, now_ms=None):
         now_ms=int(time.time()*1000) if now_ms is None else now_ms
@@ -397,8 +410,11 @@ class Store:
             row['age_now_ms']=now_ms-row['source_ms']
             row['receipt_age_now_ms']=now_ms-row['received_ms']
             ages=(row['age_now_ms'],row['receipt_age_now_ms'])
-            row['freshness_now']=('CLOCK_UNVERIFIED' if min(ages)<0 or row['source_ms']>row['received_ms'] else
-                                  'STALE' if max(ages)>self.cfg.quote_age_seconds*1000 else 'FRESH')
+            clock_status=quote_clock_status(self.cfg,row['source_ms'],row['received_ms'],now_ms)
+            row['freshness_now']='CLOCK_UNVERIFIED' if clock_status=='FUTURE' else clock_status
+            if self.cfg.source_clock_tolerance_ms:
+                row['source_lead_ms']=row['source_ms']-row['received_ms']
+                row['source_clock_tolerance_ms']=self.cfg.source_clock_tolerance_ms
             row['quote_usable_now']=(row['kind']!='last_trade_price' and row['status']=='FRESH'
                                      and row['ask'] is not None and row['bid'] is not None and row['freshness_now']=='FRESH')
         market=self.c.execute('select payload from market where id=1').fetchone()

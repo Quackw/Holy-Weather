@@ -43,7 +43,9 @@ def token_from_env():
 
 
 class Sender:
-    def __init__(self,token,transport=post):
+    def __init__(self,token,transport=post,*,minimum_interval_ms=0):
+        if type(minimum_interval_ms)is not int or not 0<=minimum_interval_ms<=60000:raise ValueError("SEND_INTERVAL_BOUND")
+        self.minimum_interval_ms=minimum_interval_ms;self.next_send_ms=0
         self.token=token;self.transport=transport;self.thread=None;self.results=queue.Queue(maxsize=1);self.stopped=False
     def tick(self,store,at):
         try:
@@ -52,11 +54,12 @@ class Sender:
         else:
             finish(store,p,r,completed)
             if r['status']!='SENT':self.stopped=True
-        if self.stopped or (self.thread and self.thread.is_alive()):return
+        if self.stopped or (self.thread and self.thread.is_alive()) or at<self.next_send_ms:return
         row=store.c.execute("select key from meta where key like ? and json_extract(value,'$.status')='PENDING' order by json_extract(value,'$.event_ms'),key limit 1",(PREFIX+'%',)).fetchone()
         if not row:return
         p=preview(store,row[0])
         if not claim(store,p,at):return
+        self.next_send_ms=at+self.minimum_interval_ms
         def send():
             try:r=self.transport(self.token,p)
             except Exception as e:r={'status':'UNKNOWN','reason':type(e).__name__}

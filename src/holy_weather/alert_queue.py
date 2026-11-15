@@ -55,7 +55,7 @@ def enqueue(store,event_id,event,market,at):
         # Event remains durable; fail closed on delivery without stopping capture.
         store.c.execute("insert or replace into meta values('alert_queue_status',?)",(canonical({'status':'FULL','limit':LIMIT}),));return
     html,expires=card(event,market,at)
-    if event['type']=='PRICE_ALERT':expires=event['current']['source_ms']+store.cfg.quote_age_seconds*1000
+    if event['type']=='PRICE_ALERT':expires=min(event['current']['source_ms'],event['current']['received_ms'])+store.cfg.quote_age_seconds*1000
     # Keep the contract-day limit valid between claim and the final HTTP check.
     expires=day_expiry(expires,market['date'],market['timezone'])
     value=dict(status='PENDING',track=event['type'],event_id=event_id,event_ms=at,html=html,

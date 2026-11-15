@@ -17,9 +17,9 @@ PRs 5/7 are preserved historical/superseded work, not pending prerequisites.
 0. **Accepted:** repository audit and PRICE-first acceptance order.
 1. **Accepted in PR 14, unmerged:** PRICE rules, bounded clock policy using Mac/Linux source evidence,
    reordered messages, batch subscriptions, gaps, restart and resource limits.
-2. **Current:** accept the PRICE foundation from PR 12 with forecast research separated;
-   qualify London/Paris/Amsterdam, then the other eight profiles individually.
-3. Finish PR 14 after PR 12: all verified buckets, one writer/queue, bounded
+2. **Accepted:** PR 12 PRICE foundation with forecast research separated;
+   saved Linux qualification for London/Paris/Amsterdam. Other profiles need individual live qualification.
+3. **Current:** reconcile PR 14 with accepted main and prepare acceptance: all verified buckets, one writer/queue, bounded
    subscriptions, per-side state, delivery accounting and measured resources.
 4. Accept PRICE Telegram evidence: atomic queue, exact links, fresh delivery,
    restart dedupe, UNKNOWN handling and collection despite sender failure.

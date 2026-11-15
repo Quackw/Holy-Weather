@@ -12,7 +12,7 @@ import threading
 import time
 from urllib.error import HTTPError, URLError
 from zoneinfo import ZoneInfo
-from .core import Config, normalize, sha
+from .core import Config, normalize, sha, quote_clock_status
 from .discovery import discover
 from .storage import Store, StorageStop
 
@@ -85,12 +85,28 @@ def process(raw, received_ms, market, store, counters):
             quote=sample['kind']not in ('last_trade_price','market_resolved')
             previous=store.seen_tops.get(sample.get('token')) if quote else None
             if previous and sample['source_ms']<previous['source_ms']:
+                # Older depth with the identical complete top cannot supersede the
+                # newer confirmed quote. Retain evidence, but do not erase it or
+                # refresh any clock. Changed/uncertain older data still invalidates.
+                if (sample['kind']=='price_change' and store.connected
+                        and sample['token'] in store.ready_tokens
+                        and (not store.cfg.price_alert_enabled or sample['token'] in store.price_alert_ready)
+                        and sample['bid'] is not None and sample['ask'] is not None
+                        and (sample['bid'],sample['ask'])==previous['top']
+                        and received_ms>=previous['received_ms']
+                        and quote_clock_status(store.cfg,sample['source_ms'],received_ms,received_ms)=='FRESH'
+                        and quote_clock_status(store.cfg,previous['source_ms'],previous['received_ms'],received_ms)=='FRESH'):
+                    store.reject(message,'LATE_UNCHANGED_DEPTH',received_ms,sample['token'],invalidate_state=False)
+                    counters['LATE_UNCHANGED_DEPTH']+=1
+                    continue
                 store.reject(message,'OUT_OF_ORDER_CONFIRMATION',received_ms,sample['token']);counters['OUT_OF_ORDER']+=1;continue
             if previous and received_ms<previous.get('received_ms',previous['persisted_ms']):
                 store.reject(message,'RECEIPT_CLOCK_REVERSED',received_ms,sample['token']);counters['RECEIPT_CLOCK_REVERSED']+=1;continue
-            if quote and previous and (sample['kind']!='best_bid_ask' or sample['token'] in store.ready_tokens) and sample['id']!=previous['identity']and sample['kind']in ('price_change','best_bid_ask')and(sample['bid'],sample['ask'])==previous['top']and 0<=received_ms-sample['source_ms']<=store.cfg.quote_age_seconds*1000 and 0<=received_ms-previous['persisted_ms']<15000 and price_confirmation_unchanged(store,sample):
+            if quote and previous and (sample['kind']!='best_bid_ask' or sample['token'] in store.ready_tokens) and sample['id']!=previous['identity']and sample['kind']in ('price_change','best_bid_ask')and(sample['bid'],sample['ask'])==previous['top']and quote_clock_status(store.cfg,sample['source_ms'],received_ms,received_ms)=='FRESH' and 0<=received_ms-previous['persisted_ms']<15000 and price_confirmation_unchanged(store,sample):
                 store.seen_tops[sample['token']]=dict(previous,source_ms=sample['source_ms'],received_ms=received_ms,identity=sample['id'])
                 counters['coalesced_unchanged_top_confirmations']+=1;continue
+            if quote and 0<sample['source_ms']-received_ms<=store.cfg.source_clock_tolerance_ms:
+                counters['bounded_source_clock_lead']+=1
             result = store.apply(sample)
             counters[result['status']] += 1
             counters['stored_input_raw_bytes']+=result.get('raw_bytes',0)
