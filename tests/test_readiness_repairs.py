@@ -81,3 +81,21 @@ def test_forecast_event_queue_survives_total_ws_failure(cfg,market,monkeypatch):
         assert s.c.execute("select count(*) from events where type='LAMP_ALERT'").fetchone()[0]==1
         assert s.c.execute("select count(*) from meta where key like 'alert_delivery_v1:%'").fetchone()[0]==1
         assert s.stats()['sqlite_integrity']=='ok'
+
+
+def test_midnight_before_connect_never_subscribes_old_contract(cfg,market,monkeypatch):
+    from datetime import timedelta
+    class NextDay(datetime):
+        @classmethod
+        def now(cls,tz=None):
+            return (datetime.fromtimestamp(AT/1000,timezone.utc)+timedelta(days=1)).astimezone(tz)
+    monkeypatch.setattr(app,'datetime',NextDay)
+    monkeypatch.setattr(app,'discover',lambda _: (market,{}))
+    connects=[]
+    def connect(*a,**k):
+        connects.append(1)
+        raise OSError('OLD_CONTRACT_MUST_NOT_CONNECT')
+    result=app.observe(replace(cfg,duration_seconds=1,max_reconnects=0),connect=connect)
+    assert not connects
+    assert result['state']=='MARKET_LOCAL_DATE_ENDED'
+    assert result['storage']['sqlite_integrity']=='ok'
