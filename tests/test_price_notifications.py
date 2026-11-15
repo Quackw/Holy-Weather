@@ -9,7 +9,7 @@ from test_price_alert import send,AT
 from test_alert_queue import keys
 
 
-def cfg_on(cfg):return replace(cfg,price_alert_enabled=True,alert_queue_enabled=True,price_notification_filter=True,price_confirmation_seconds=5)
+def cfg_on(cfg):return replace(cfg,price_alert_enabled=True,alert_queue_enabled=True,price_notification_filter=True,price_confirmation_seconds=5,price_batch_seconds=30)
 def feed(s,m,make,bid,ask,at,side='YES'):
     send(s,m,make(ask,at,bid=bid,token=m['tokens'][side]),at)
 def value(s,k):return json.loads(s.c.execute('select value from meta where key=?',(k,)).fetchone()[0])
@@ -177,7 +177,7 @@ def test_documents_lost_later_bid_confirmation(cfg,market,make_raw,level,bid,ask
 def test_catalogue_enabled_policy_reaches_real_queue(gamma,tmp_path):
     from test_catalogue import setup,feed as catalogue_feed
     from holy_weather.catalogue import CatalogueStore,Router
-    cfg,markets=setup(gamma,tmp_path,2);cfg=replace(cfg,price_notification_filter=True)
+    cfg,markets=setup(gamma,tmp_path,2);cfg=replace(cfg,price_notification_filter=True,price_batch_seconds=30)
     with CatalogueStore(cfg) as s:
         for m,r in markets:s.bind(m,r)
         s.connection_started(AT);router=Router(s)

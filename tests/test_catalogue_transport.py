@@ -34,6 +34,7 @@ def test_disconnect_history_survives_diagnostic_rotation_and_restart(gamma,tmp_p
     history=r['transport'];errors=[x for x in history['recent'] if x['kind']=='DISCONNECTED']
     assert [x['detail'] for x in errors]==['synthetic failure '+str(i) for i in range(1,5)]
     assert history['recent'][-1]['state']==r['state']
+    assert [x['snapshot']['attempt'] for x in errors]==[1,2,3,4]
     with CatalogueStore(cfg) as s:
         for n in range(600):s.diagnostic('PRICE_ALERT','rotation',AT+n)
     with CatalogueStore(cfg) as s:
@@ -105,3 +106,91 @@ def test_native_queue_backpressure_can_timeout_with_responding_peer():
     finally:
         a.close_socket();b.close_socket()
         a.recv_events_thread.join(.5);b.recv_events_thread.join(.5)
+
+
+def test_unmeasured_native_rtt_is_not_zero():
+    from holy_weather.catalogue import native_timing
+    class WS:latency=0.0
+    assert native_timing(WS())=={'native_last_pong_ms':None,'native_rtt_ms':None}
+
+
+@pytest.mark.parametrize('code',[1008,1009])
+def test_policy_and_large_frame_refusal_do_not_reconnect(gamma,tmp_path,code):
+    from websockets.exceptions import ConnectionClosedError
+    from websockets.frames import Close
+    cfg,markets=setup(gamma,tmp_path,1);m,receipt=markets[0];calls=[]
+    def connect(*a,**k):
+        calls.append(1);raise ConnectionClosedError(Close(code,'synthetic refusal'),None)
+    r=observe_catalogue(cfg,discover=lambda city:([m],receipt,[]) if city=='london' else ([],{},[]),connect=connect,clock=lambda:AT)
+    assert len(calls)==1 and r['state']=='NETWORK_REFUSED_NO_RETRY'
+    error=next(e for e in r['transport']['recent'] if e['kind']=='DISCONNECTED')
+    assert error['close_code']==code and error['transient'] is False
+
+
+def test_resolved_pending_high_never_sent_between_maintenance_ticks(gamma,tmp_path,monkeypatch):
+    from collections import deque
+    from holy_weather.telegram import Sender
+    cfg,markets=setup(gamma,tmp_path,1);m,receipt=markets[0]
+    ticks=[0.0];calls=[];senders=[]
+    class DelayedSender(Sender):
+        def __init__(self,*a,**kw):
+            super().__init__(*a,**kw);self.next_send_ms=AT+40;senders.append(self)
+    monkeypatch.setattr('holy_weather.telegram.Sender',DelayedSender)
+    monkeypatch.setattr('holy_weather.telegram.millis',lambda:AT+int(ticks[0]*1000))
+    seq=deque([message(m,m['tokens']['YES'],'0.49',AT+10),message(m,m['tokens']['YES'],'0.71',AT+20),json.dumps({'event_type':'market_resolved','market':m['condition_id']})])
+    class WS:
+        def __enter__(self):return self
+        def __exit__(self,*a):pass
+        def send(self,raw):pass
+        def recv(self,timeout):
+            if senders and senders[0].thread:senders[0].thread.join(.1)
+            ticks[0]+=.01
+            return seq.popleft() if seq else 'PONG'
+    r=observe_catalogue(replace(cfg,duration_seconds=1,telegram_enabled=True,price_notification_filter=True),discover=lambda city:([m],receipt,[]) if city=='london' else ([],{},[]),connect=lambda *a,**k:WS(),clock=lambda:AT+int(ticks[0]*1000),monotonic=lambda:ticks[0],wait=lambda d:ticks.__setitem__(0,ticks[0]+d),token='unused',transport=lambda *a:(calls.append(a) or {'status':'SENT','message_id':1}))
+    assert calls==[]
+    assert r['price_events']==1 and r['deliveries']=={'EXPIRED':1}
+
+
+def test_disconnect_snapshot_has_latest_group_subscription_count(gamma,tmp_path):
+    cfg,markets=setup(gamma,tmp_path);ticks=[0.0];sent=[]
+    by_city=dict(zip(__import__('holy_weather.core',fromlist=['EUROPE_CITIES']).EUROPE_CITIES,markets))
+    class WS:
+        def __enter__(self):return self
+        def __exit__(self,*a):pass
+        def send(self,raw):
+            if raw!='PING':sent.extend(json.loads(raw)['assets_ids'])
+        def recv(self,timeout):
+            ticks[0]+=.1
+            if len(sent)==22:raise OSError('disconnect just after second group')
+            return 'PONG'
+    r=observe_catalogue(replace(cfg,duration_seconds=5,max_reconnects=0),discover=lambda city:([by_city[city][0]],by_city[city][1],[]),connect=lambda *a,**k:WS(),clock=lambda:AT+int(ticks[0]*1000),monotonic=lambda:ticks[0])
+    assert r['transport']['snapshot']['subscribed_tokens']==22
+    error=next(x for x in r['transport']['recent'] if x['kind']=='DISCONNECTED')
+    assert error['snapshot']['subscribed_tokens']==22
+
+
+def test_timed_connection_factory_real_handshake_and_native_pong():
+    import socket,threading,time
+    from websockets.sync.server import ServerConnection
+    from websockets.server import ServerProtocol
+    from websockets.sync.client import connect
+    from holy_weather.catalogue import TimedClientConnection,native_timing
+    left,right=socket.socketpair()
+    from types import SimpleNamespace
+    server=ServerConnection(right,ServerProtocol(),SimpleNamespace(socket_closed=threading.Event()),ping_interval=None,close_timeout=.1)
+    errors=[]
+    def handshake():
+        try:server.handshake()
+        except Exception as exc:errors.append(exc)
+    peer=threading.Thread(target=handshake,daemon=True);peer.start()
+    try:
+        with connect('ws://localhost/qualification',sock=left,proxy=None,create_connection=TimedClientConnection,ping_interval=None,open_timeout=2,close_timeout=.1) as client:
+            peer.join(1);assert not errors and not peer.is_alive()
+            assert isinstance(client,TimedClientConnection)
+            assert client.ping().wait(1)
+            deadline=time.monotonic()+1
+            while client.native_last_pong_ms is None and time.monotonic()<deadline:threading.Event().wait(.001)
+            assert client.native_last_pong_ms is not None
+            assert native_timing(client)['native_rtt_ms'] is not None
+    finally:
+        server.close_socket();peer.join(.5)

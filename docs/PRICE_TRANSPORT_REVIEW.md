@@ -41,8 +41,9 @@ reproduction are the exact-version evidence.
 
 A separate regression proves excessive per-frame global maintenance: 200 feed
 messages on the old code made 815 market-activity checks; the candidate performs
-fewer than 400. Shared activity scans, unsubscription and queue retirement now run
-at most every 250ms. Every routed message still independently checks its own
+fewer than 400. Shared activity scans and unsubscription now run at most every 250ms.
+Queue retirement remains before every sender tick, so resolution cannot leak
+a pending notification between those scans. Every routed message still independently checks its own
 market's date and resolution before processing; HTTP delivery retains its final
 expiry check. No market cutoff, quote limit or detector threshold is relaxed.
 
@@ -54,7 +55,7 @@ records. Error text is bounded to 240 characters. This survives ordinary
 diagnostic rotation and restart. It is not an unlimited log.
 
 Snapshots include maximum/total processing time, frame count/maximum bytes,
-maximum maintenance duration, subscribed token count, last frame time, distinct
+maximum maintenance duration, successfully requested subscription token count (updated on each group), last frame time, distinct
 application PING/PONG times, native PONG time and native RTT. Native timestamps
 are observed in the library's existing receiver thread; that thread updates only
 a scalar clock and never writes SQLite. The existing main thread is the sole
@@ -69,7 +70,8 @@ application text PONG are tested separately; unobserved clocks remain null.
 
 ## Tests and real evidence
 
-502 tests pass locally at this stage. Recovery coverage includes resubscription,
+502 tests passed locally and in Linux CI at the initial transport stage; the
+final acceptance report records the expanded final suite. Recovery coverage includes resubscription,
 first quote after GAP as baseline, once-only flags, finite exhaustion/deadline,
 protocol refusal, rollover, queue integrity, timing fields and durable bounded
 history after 600 diagnostic rotations. The new activity-scan regression fails

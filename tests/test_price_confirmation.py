@@ -16,24 +16,24 @@ def high(s,m,make):
     return keys(s)[0]
 
 
-@pytest.mark.parametrize('seconds',[5,8,10])
-def test_windows_confirm_exact_deadline(cfg,market,make_raw,seconds):
+@pytest.mark.parametrize('seconds,wait_ms',[(5,5000),(8,8000),(10,8000)])
+def test_windows_confirm_exact_deadline(cfg,market,make_raw,seconds,wait_ms):
     with Store(replace(cfg_on(cfg),price_confirmation_seconds=seconds)) as s:
         k=high(s,market,make_raw)
-        feed(s,market,make_raw,'0.57','0.84',AT+100+seconds*1000)
+        feed(s,market,make_raw,'0.57','0.84',AT+100+wait_ms)
         assert value(s,k)['confirmation']=='CONFIRMED'
         assert s.c.execute("select count(*) from events where type='PRICE_ALERT'").fetchone()[0]==1
         assert not s.c.execute('pragma foreign_key_check').fetchall()
 
 
-@pytest.mark.parametrize('seconds',[5,8,10])
-def test_high_timeout_explicit_warning_and_no_late_upgrade(cfg,market,make_raw,seconds):
+@pytest.mark.parametrize('seconds,wait_ms',[(5,5000),(8,8000),(10,8000)])
+def test_high_timeout_explicit_warning_and_no_late_upgrade(cfg,market,make_raw,seconds,wait_ms):
     with Store(replace(cfg_on(cfg),price_confirmation_seconds=seconds)) as s:
-        k=high(s,market,make_raw);advance_waits(s,AT+101+seconds*1000)
+        k=high(s,market,make_raw);advance_waits(s,AT+101+wait_ms)
         v=value(s,k)
         assert v['status']=='PENDING' and v['confirmation']=='UNCONFIRMED'
         assert 'Ask-only · not confirmed by bid' in preview(s,k)['html']
-        feed(s,market,make_raw,'0.57','0.84',AT+102+seconds*1000)
+        feed(s,market,make_raw,'0.57','0.84',AT+102+wait_ms)
         assert value(s,k)['confirmation']=='UNCONFIRMED'
         assert not claim(s,preview(s,k),AT+91000)
         assert value(s,k)['status']=='EXPIRED'

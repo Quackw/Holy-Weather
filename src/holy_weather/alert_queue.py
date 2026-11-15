@@ -9,7 +9,7 @@ from .core import canonical,sha,CITIES
 PREFIX='alert_delivery_v1:'
 TARGET='@holy_weather'
 LIMIT=1024
-PRICE_BATCH_MS=30000
+
 
 
 def num(v):return format(Decimal(str(v)).normalize(),'f')
@@ -75,6 +75,7 @@ def enqueue(store,event_id,event,market,at):
     if not store.cfg.alert_queue_enabled:
         admission('NOT_QUEUED','QUEUE_DISABLED');return
     filtered=store.cfg.price_notification_filter and event['type']=='PRICE_ALERT'
+    priority=int(filtered and any(Decimal(t)>=Decimal('0.70') for t in event['thresholds']))
     waiting=filtered and Decimal(event['current']['bid'])<=Decimal(event['previous']['bid'])
     key=PREFIX+sha([TARGET,event['type'],event_id])
     if store.c.execute('select 1 from meta where key=?',(key,)).fetchone():return
@@ -83,7 +84,7 @@ def enqueue(store,event_id,event,market,at):
     # Keep the contract-day limit valid between claim and the final HTTP check.
     expires=day_expiry(expires,market['date'],market['timezone'])
     if filtered and not waiting:
-        row=store.c.execute("select key,value from meta where key like ? and json_extract(value,'$.status')='PENDING' and json_extract(value,'$.delivery_notes') is null and json_extract(value,'$.confirmation') is null and json_extract(value,'$.batch_market')=? and json_extract(value,'$.side')=? and json_extract(value,'$.batch_until_ms')>? order by json_extract(value,'$.event_ms') limit 1",(PREFIX+'%',market['url'],event['side'],at)).fetchone()
+        row=store.c.execute("select key,value from meta where key like ? and json_extract(value,'$.status')='PENDING' and json_extract(value,'$.delivery_notes') is null and json_extract(value,'$.confirmation') is null and json_extract(value,'$.batch_market')=? and json_extract(value,'$.side')=? and coalesce(json_extract(value,'$.priority'),0)=? and json_extract(value,'$.batch_until_ms')>? order by json_extract(value,'$.event_ms') limit 1",(PREFIX+'%',market['url'],event['side'],priority,at)).fetchone()
         if row:
             v=json.loads(row[1])
             if v['event_ms']<=at<=v['expires_ms'] and len(v['event_ids'])<10:
@@ -106,10 +107,14 @@ def enqueue(store,event_id,event,market,at):
     value=dict(status='PENDING',track=event['type'],event_id=event_id,event_ms=at,html=html,
                expires_ms=expires,target=TARGET,market_date=market['date'],timezone=market['timezone'])
     if filtered:
-        value.update(event_ids=[event_id],side=event['side'],token=event['token'],batch_market=market['url'],batch_until_ms=at+PRICE_BATCH_MS,
-                     not_before_ms=min(at+PRICE_BATCH_MS,max(at,expires-1000)))
+        batch_ms=store.cfg.price_batch_seconds*1000
+        value.update(event_ids=[event_id],side=event['side'],token=event['token'],batch_market=market['url'],batch_until_ms=at+batch_ms,
+                     priority=priority,delivery_policy='FAST_HIGH_V1',
+                     not_before_ms=at if priority else min(at+batch_ms,max(at,expires-1000)))
     if waiting:
-        value.update(status='WAITING_BID',wait_until_ms=min(at+store.cfg.price_confirmation_seconds*1000,expires),
+        # Retain older experiment configs, but the final delivery policy caps at 8s.
+        window_ms=min(store.cfg.price_confirmation_seconds,8)*1000
+        value.update(status='WAITING_BID',confirmation_window_ms=window_ms,wait_until_ms=min(at+window_ms,expires),
                      original_bid=event['current']['bid'],original_source_ms=event['current']['source_ms'],
                      thresholds=event['thresholds'],confirmation='WAITING')
     store.c.execute('insert into meta values(?,?)',(key,canonical(value)))
@@ -121,15 +126,23 @@ def settle_waits(store,at,*,sample=None,status=None,gap=None,token=None):
     """Caller owns transaction. Delivery-only evidence; never change PRICE state."""
     from .core import quote_clock_status
     from .price_alert import midpoint
-    rows=store.c.execute("select key,value from meta where key like ? and json_extract(value,'$.status')='WAITING_BID'",(PREFIX+'%',)).fetchall()
+    rows=store.c.execute("select key,value from meta where key like ? and (json_extract(value,'$.status')='WAITING_BID' or (? and json_extract(value,'$.status')='PENDING' and (json_extract(value,'$.confirmation') is not null or json_extract(value,'$.delivery_notes') is not null)))",(PREFIX+'%',gap is not None or sample is not None)).fetchall()
     for key,raw in rows:
         v=json.loads(raw)
         if token is not None and v['token']!=token:continue
         reason=None
+        invalid=bool(sample and sample['token']==v['token'] and sample['kind']!='last_trade_price' and
+                     (status!='FRESH' or midpoint(sample['bid'],sample['ask']) is None or
+                      sample['kind']=='best_bid_ask' and (sample['bid']=='0' or sample['ask']=='1')))
         if gap:
             v.update(status='REJECTED',reason='CONFIRMATION_GAP:'+gap,confirmation='GAP',completed_ms=at)
-        elif sample and sample['token']==v['token'] and sample['kind']!='last_trade_price' and status!='FRESH':
-            v.update(status='REJECTED',reason='CONFIRMATION_INVALID_QUOTE:'+str(status),confirmation='GAP',completed_ms=at)
+        elif invalid:
+            label=str(status) if status!='FRESH' else 'UNUSABLE_BBO'
+            v.update(status='REJECTED',reason='CONFIRMATION_INVALID_QUOTE:'+label,confirmation='GAP',completed_ms=at)
+        elif v['status']!='WAITING_BID':
+            # Settled outcomes may be invalidated before claim, never reconfirmed
+            # or converted back to a timeout. UNKNOWN/SENT aren't selected.
+            continue
         elif at>v['expires_ms']:
             v.update(status='EXPIRED',reason='CONFIRMATION_EXPIRED',confirmation='EXPIRED',completed_ms=at)
         else:
@@ -163,7 +176,7 @@ def advance_waits(store,at):
             if at>v['expires_ms']:
                 v.update(status='EXPIRED',reason='DELIVERY_EXPIRED',completed_ms=at)
                 store.c.execute('update meta set value=? where key=?',(canonical(v),key));continue
-            identity=(v['batch_market'],v.get('side'))
+            identity=(v['batch_market'],v.get('side'),v.get('priority',0))
             previous=groups.get(identity)
             if previous and v['event_ms']<previous[1]['batch_until_ms'] and len(previous[1]['event_ids'])+len(v['event_ids'])<=10:
                 k,a=previous

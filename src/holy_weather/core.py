@@ -81,8 +81,10 @@ class Config:
     telegram_enabled: bool = False
     price_notification_filter: bool = False
     price_confirmation_seconds: int = 8
+    price_batch_seconds: int = 10
 
     def __post_init__(self):
+        if type(self.price_batch_seconds)is not int or self.price_batch_seconds not in (10,15,30):raise ValueError('PRICE_BATCH_WINDOW')
         if type(self.price_confirmation_seconds)is not int or self.price_confirmation_seconds not in (5,8,10):raise ValueError('PRICE_CONFIRMATION_WINDOW')
         if type(self.price_notification_filter)is not bool:raise ValueError('PRICE_NOTIFICATION_FILTER_BOOLEAN')
         if self.city in EUROPE_CITIES and self.lamp_context:
@@ -134,7 +136,7 @@ class Config:
         return self.date or now.astimezone(ZoneInfo(CITIES[self.city][2])).date().isoformat()
 
     def rule_hash(self):
-        rules={k: v for k, v in asdict(self).items() if k not in ('data_dir', 'duration_seconds', 'max_reconnects', 'weather_context', 'lamp_context', 'price_alert_enabled', 'lamp_alert_enabled', 'lamp_peak_change_f', 'alert_queue_enabled', 'telegram_enabled', 'price_notification_filter', 'price_confirmation_seconds')}
+        rules={k: v for k, v in asdict(self).items() if k not in ('data_dir', 'duration_seconds', 'max_reconnects', 'weather_context', 'lamp_context', 'price_alert_enabled', 'lamp_alert_enabled', 'lamp_peak_change_f', 'alert_queue_enabled', 'telegram_enabled', 'price_notification_filter', 'price_confirmation_seconds', 'price_batch_seconds')}
         # Preserve accepted configurations/database hashes when tolerance is off.
         if not self.source_clock_tolerance_ms:rules.pop('source_clock_tolerance_ms')
         return sha(rules)

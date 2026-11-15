@@ -1,23 +1,82 @@
-# PRICE delivery policy — PR 17, opt-in, not deployed
+# PRICE delivery — final PR 17 candidate
 
-The PRICE detector is unchanged: Decimal midpoint, upward 50/55/60/70/80%, once-only, REARM=false. Delivery never creates a replacement PRICE event or changes fired thresholds. LAMP remains independent.
+PRICE detection is unchanged: Decimal midpoint of the real side token, upward
+50/55/60/70/80%, once per market/side/threshold, REARM=false. One MULTI-CROSS per
+update. Delivery never creates another PRICE event or resets a fired threshold.
 
-Enable `price_notification_filter` explicitly (catalogue CLI `--price-notification-filter`). Default OFF preserves existing runtime. `price_confirmation_seconds` supports 5, 8, 10; candidate default **8 seconds**. On the fixed saved history 8 retained one additional low-threshold confirmation compared with 5; 10 added none. This is not statistical optimization or evidence of demand/profit.
+`price_notification_filter` is opt-in and remains OFF by default. The catalogue
+CLI exposes `--price-notification-filter` and `--price-batch-seconds 10|15|30`.
+Ordinary batching defaults to **10 seconds**, chosen from the fixed real-history
+comparison, not by minimizing messages. All three windows gave the same card
+count; 10 seconds had lower delay. This small sample does not prove a universal
+noise optimum or a trading advantage.
 
-## Bounded delivery state
+## Priority 70/80
 
-- An upward crossing without bid growth creates a normal original PRICE event and a durable `WAITING_BID` queue row. Its original expiry, token, source time, bid and thresholds are retained. It counts toward the existing 1024 unresolved-entry bound.
-- Only a later received, later source-time, fresh confirmed book/BBO for the **same token**, with bid above the crossing bid and midpoint at least the highest crossed threshold, confirms delivery. A small bid increase is only a mechanical condition.
-- The confirming input is linked through `event_inputs` and recorded on the queue row; original PRICE payload/prices and fired state are not rewritten. Confirmation and its input reference commit together with the input transaction.
-- Timeout below 70% becomes explicit `REJECTED / NO_BID_CONFIRMATION_WITHIN_WINDOW`. Timeout containing 70/80% becomes a pending compact card with **Ask-only · not confirmed by bid**. A later quote never upgrades that final confirmation decision.
-- GAP, restart, invalid continuity, market resolution and expiry prevent revival. Their outcome is durable and explicit. No waiting state is carried across a new connection as a confirmation opportunity. UNKNOWN is never retried.
-- Compatible unclaimed notifications group by exact bucket/date **and side** in a fixed 30-second window, maximum ten event references. YES and NO are separate cards. Original event IDs, constituent delivery outcomes and confirmation evidence remain available; absorbed rows retain `MERGED` and the owning queue key.
-- Oldest source/receipt expiry and local midnight still govern every card. Waiting/batching cannot extend the 90-second limit. No merge into SENT/UNKNOWN, across sides, or with LAMP. Warning text survives grouping. Queue-full refusal remains explicit per event; final rows do not consume unresolved capacity.
+Any event containing 70% or 80% is priority, including a MULTI-CROSS containing
+lower levels. A bid-growing crossing is ready immediately. An ask-only crossing
+waits for a later fresh full book/BBO of the same token, later source and receipt
+times, bid above the crossing bid, midpoint at least the highest crossed level.
+A small bid increase is a mechanical delivery check, not proof of demand.
 
-No new schema, dependency, service, weather logic, PRICE thresholds or storage limits.
+Default wait is **8 seconds**, with a hard maximum of 8. Prior experiment configs
+5/8/10 still load; 10 is explicitly capped to 8 and the effective window is saved
+as `confirmation_window_ms`. Stored deadlines remain authoritative on reopen.
+A confirmation makes priority work ready immediately. Timeout without confirmation
+makes it ready with **Ask-only · not confirmed by bid**, only while original
+freshness and continuity remain valid. No additional batch delay is added.
 
-## Rollback / compatibility
+The shared sender still permits one in-flight send and its existing 3.1s pacing.
+Ready priority work is selected before ready ordinary work; an existing HTTP
+request is not interrupted. Priority readiness does not promise instant delivery
+under backlog, rate limits or a stopped/uncertain sender.
 
-Schema remains v1 and accepted rule hash is preserved. Disable the filter using this version to stop new waiting admissions; durable existing states keep their rules. Session restart explicitly rejects unconfirmed waiting entries, preserving evidence. SENT/UNKNOWN remain non-repeatable. Tests cover rollback by configuration without restoring any database.
+## Ordinary 50/55/60
 
-Before returning to pre-policy code, all WAITING_BID and batched pending work must be explicitly finalized using this version: older senders do not understand its timing/grouping. Remove new config keys for old code. Never restore an old database, reset thresholds, or retry UNKNOWN. No live rollback/deployment occurred.
+All original events are retained. Ask-only events use the same bounded bid check;
+without confirmation they end with explicit
+`REJECTED / NO_BID_CONFIRMATION_WITHIN_WINDOW`. Eligible ordinary events group
+inside a fixed, non-sliding 10/15/30s window. At most ten event references; no
+cross-market, cross-date, cross-side or cross-track merge.
+
+Priority and ordinary work have separate grouping keys, so an old ordinary group
+cannot delay or shorten the lifetime of a new priority event. Already pending
+same-priority events may combine opportunistically before claim, without an
+intentional wait for priority. YES and NO stay independent cards. All source
+IDs, absorbed-row owner links, confirmation inputs and warnings remain durable.
+
+## Continuity, expiry and atomicity
+
+`WAITING_BID` counts toward the existing 1024 unresolved-entry bound. Confirmation
+input, evidence link and state change commit in the same input transaction.
+GAP, restart, missing/invalid bid/ask and BBO sentinels invalidate unclaimed
+ask-only work, including already settled confirmation/fallback work. A valid
+later quote cannot revive or upgrade its final decision. SENT and UNKNOWN are
+not selected or retried. UNKNOWN remains explicit and consumes unresolved
+capacity. Queue-full admission refusal remains explicit on each source event.
+
+The oldest constituent source/receipt expiry and local midnight remain in force;
+no wait/group extends the 90-second limit. Market retirement is checked before
+every catalogue sender tick, independently of throttled global subscription
+maintenance. The final HTTP expiry check is preserved. Resolution/date expiry
+cannot be bypassed by the 250ms maintenance cadence.
+
+No schema, weather, LAMP algorithm, dependency, service or budget change. One
+writer; source events and their evidence remain protected by existing retention.
+
+## Compatibility and rollback
+
+The accepted rule hash and SQLite schema v1 are unchanged. Disabling the filter
+using this version stops new policy admissions while existing stored work keeps
+its deadlines/status. Old experimental waiting rows remain interpretable.
+
+Before returning to pre-PR17 code, explicitly finalize unclaimed WAITING_BID and
+batched PENDING work with this version, preserving source events, evidence and
+an explicit rollback reason. Never retry UNKNOWN/SENT or restore an old DB.
+Remove policy-only config keys for an old reader. The isolated two-phase check
+opened the resulting data with the actual accepted-main code, preserved three
+PRICE events and UNKNOWN, added two new inputs after rollback and produced no
+repeated PRICE event. No runtime rollback or deployment occurred.
+
+See [comparison and acceptance](PRICE_NOTIFICATION_REVIEW.md) and
+[transport diagnosis](PRICE_TRANSPORT_REVIEW.md).

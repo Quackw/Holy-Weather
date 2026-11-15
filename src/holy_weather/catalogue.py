@@ -35,7 +35,7 @@ class TimedClientConnection(ClientConnection):
 def native_timing(ws):
     latency=getattr(ws,'latency',None)
     return {'native_last_pong_ms':getattr(ws,'native_last_pong_ms',None),
-            'native_rtt_ms':round(latency*1000,3) if isinstance(latency,(int,float)) else None}
+            'native_rtt_ms':round(latency*1000,3) if isinstance(latency,(int,float)) and latency>0 else None}
 
 
 def local_days(at):
@@ -172,6 +172,7 @@ class CatalogueStore(Store):
         value=json.loads(row[0]) if row else {'sequence':0,'counts':{},'recent':[]}
         if record is not None:
             record=dict(record)
+            if snapshot is not None:record['snapshot']=dict(snapshot)
             for key in ('detail','error','state'):
                 if key in record:record[key]=str(record[key])[:240]
             value['sequence']+=1;record['sequence']=value['sequence']
@@ -373,7 +374,7 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
                     if wait(min(1,max(0,deadline-monotonic()))):break
                     continue
                 result['state']='COMPLETED_WINDOW'
-                telemetry={'attempt':reconnects+1,'connect_started_ms':clock(),'frames':0,'max_frame_bytes':0,
+                telemetry={'attempt':reconnects+1,'connect_started_ms':clock(),'subscribed_tokens':0,'frames':0,'max_frame_bytes':0,
                            'processing_ms_total':0,'processing_ms_max':0,'maintenance_ms_max':0,
                            'application_last_pong_ms':None,'application_last_ping_ms':None,'last_frame_ms':None}
                 store.transport_record({'kind':'CONNECTING','at_ms':clock(),'attempt':reconnects+1},telemetry)
@@ -390,6 +391,7 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
                         store.transport_record({'kind':'CONNECTED','at_ms':clock(),'attempt':reconnects+1},telemetry)
                         ws.send(canonical({'type':'market','assets_ids':tokens[:16],'custom_feature_enabled':True}))
                         subscribed=min(16,len(tokens));live_tokens=set(tokens[:16]);next_subscription=monotonic()+1
+                        telemetry['subscribed_tokens']=len(live_tokens)
                         last_ping=monotonic();last_pong=last_ping;next_stats=last_ping
                         next_maintenance=last_ping
                         while not stop.is_set() and monotonic()<deadline:
@@ -399,6 +401,7 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
                                 batch=[t for t in tokens[subscribed:subscribed+16] if store.active(store.tokens[t],at)]
                                 if batch:ws.send(canonical({'operation':'subscribe','assets_ids':batch,'custom_feature_enabled':True}))
                                 live_tokens.update(batch)
+                                telemetry['subscribed_tokens']=len(live_tokens)
                                 subscribed+=16;next_subscription=monotonic()+1
                             if monotonic()>=next_maintenance:
                                 maintenance_start=monotonic()
@@ -408,9 +411,12 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
                                 for start in range(0,len(closed),16):
                                     ws.send(canonical({'operation':'unsubscribe','assets_ids':closed[start:start+16]}))
                                 live_tokens.difference_update(closed)
-                                store.expire_closed_deliveries(at)
+                                telemetry['subscribed_tokens']=len(live_tokens)
                                 telemetry['maintenance_ms_max']=max(telemetry['maintenance_ms_max'],round((monotonic()-maintenance_start)*1000,3))
                                 next_maintenance=monotonic()+.25
+                            # Queue eligibility must see lifecycle changes on every
+                            # turn, including between throttled global scans.
+                            store.expire_closed_deliveries(at)
                             if sender:sender.tick(store,at)
                             if monotonic()>=next_stats:
                                 store.set_meta('catalogue_counters',{'router':dict(router.counters),'markets':{k:dict(v) for k,v in router.per_market.items()}})
@@ -465,6 +471,7 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
                     break
             store.gap('CATALOGUE_SESSION_ENDED',clock())
             result['reconnects']=reconnects
+            if telemetry.get('connected_ms'):telemetry.update(native_timing(ws))
             if sender:sender.close(store)
             if stop.is_set():result['state']='SIGNAL_STOP'
             result['transport']=store.transport_record({'kind':'STOPPED','at_ms':clock(),'state':result['state'],'reconnects':reconnects},telemetry)
@@ -489,11 +496,12 @@ def main():
     parser.add_argument('--seconds',type=int,default=120)
     parser.add_argument('--send',action='store_true')
     parser.add_argument('--price-notification-filter',action='store_true',
-                        help='Wait for ask-only bid confirmation and batch same-side bucket updates (30s)')
+                        help='Fast 70/80 delivery, ask-only bid confirmation, and ordinary same-side batches')
+    parser.add_argument('--price-batch-seconds',type=int,choices=(10,15,30),default=10)
     args=parser.parse_args();stop=threading.Event()
     for sig in (signal.SIGINT,signal.SIGTERM):signal.signal(sig,lambda *_:stop.set())
     cfg=CatalogueConfig(data_dir=args.data_dir,duration_seconds=args.seconds,telegram_enabled=args.send,
-                        price_notification_filter=args.price_notification_filter)
+                        price_notification_filter=args.price_notification_filter,price_batch_seconds=args.price_batch_seconds)
     result=observe_catalogue(cfg,token=token_from_env() if args.send else None,stop=stop)
     print(json.dumps(result,ensure_ascii=False,sort_keys=True))
     return 0 if result['state']=='COMPLETED_WINDOW' else 2
