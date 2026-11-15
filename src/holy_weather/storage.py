@@ -433,7 +433,7 @@ class Store:
                 # Clear expired comparison windows before explicit maintenance.
                 for row in self.c.execute('select token,payload from state').fetchall():
                     self.c.execute('update state set payload=? where token=?', (canonical(reset(json.loads(row['payload']))), row['token']))
-                self.c.execute('delete from events where received_ms<?', (now_ms-30*24*3600*1000,))
+                self.c.execute("delete from events where received_ms<? and id not in (select json_extract(value,'$.event_id') from meta where key like 'alert_delivery_v1:%')", (now_ms-30*24*3600*1000,))
                 self.c.execute('delete from samples where input_id in ('+query+')', (cutoff,))
                 self.c.execute('delete from inputs where id in ('+query+')', (cutoff,))
         return {'eligible_unreferenced_inputs': len(candidates), 'applied': apply}

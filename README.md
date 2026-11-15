@@ -228,3 +228,9 @@ reconnect budget applies; exhaustion exits explicitly. This deadline does not
 change the 90-second quote freshness limit. See
 `docs/STREAM_RECOVERY_20261114.md` for failure tests and the 13 recorded incidents.
 Future stages are planning only in `docs/ROADMAP.md`.
+
+## Shared Telegram queue (PR D)
+
+Default-off durable PRICE/LAMP queue and short English previews: see
+[SHARED_TELEGRAM_QUEUE.md](docs/SHARED_TELEGRAM_QUEUE.md). Exact test previews
+require separate permission before sending. No production deployment.

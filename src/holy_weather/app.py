@@ -38,6 +38,15 @@ def disk_write_bytes():
         return None
 
 
+def price_confirmation_unchanged(store,sample):
+    """Depth updates cannot prove that PRICE already processed this full BBO."""
+    if not store.cfg.price_alert_enabled or sample['kind']!='best_bid_ask':return True
+    if sample['token'] not in store.price_alert_ready:return False
+    row=store.c.execute('select value from meta where key=?',('price_alert_v1:'+sample['token'],)).fetchone()
+    previous=json.loads(row[0]).get('previous') if row else None
+    return bool(previous and (previous['bid'],previous['ask'])==(sample['bid'],sample['ask']))
+
+
 def process(raw, received_ms, market, store, counters):
     size = len(raw.encode())
     counters['wire_bytes'] += size; counters['frames'] += 1
@@ -59,7 +68,15 @@ def process(raw, received_ms, market, store, counters):
         try:
             sample = normalize(message,received_ms,market,change=change)
             if sample is None:
-                counters['ignored_depth_or_control']+=1;continue
+                counters['ignored_depth_or_control']+=1
+                # Lifecycle broadcasts are not price updates for our tokens.
+                # Fixed counter names avoid cardinality or per-frame SQL growth.
+                kind=message.get('event_type')
+                counter=('ignored_new_market' if kind=='new_market' else
+                         'ignored_tick_size_change' if kind=='tick_size_change' else 'ignored_unknown_type')
+                counters[counter]+=1
+                continue
+            counters['received_'+sample['kind']]+=1
             if store.known_duplicate(sample):
                 counters['DUPLICATE']+=1
                 if counters['DUPLICATE']==1 or counters['DUPLICATE']%128==0:
@@ -71,7 +88,7 @@ def process(raw, received_ms, market, store, counters):
                 store.reject(message,'OUT_OF_ORDER_CONFIRMATION',received_ms,sample['token']);counters['OUT_OF_ORDER']+=1;continue
             if previous and received_ms<previous.get('received_ms',previous['persisted_ms']):
                 store.reject(message,'RECEIPT_CLOCK_REVERSED',received_ms,sample['token']);counters['RECEIPT_CLOCK_REVERSED']+=1;continue
-            if quote and previous and (not store.cfg.price_alert_enabled or sample['kind']!='best_bid_ask' or sample['token'] in store.price_alert_ready) and (sample['kind']!='best_bid_ask' or sample['token'] in store.ready_tokens) and sample['id']!=previous['identity']and sample['kind']in ('price_change','best_bid_ask')and(sample['bid'],sample['ask'])==previous['top']and 0<=received_ms-sample['source_ms']<=store.cfg.quote_age_seconds*1000 and 0<=received_ms-previous['persisted_ms']<15000:
+            if quote and previous and (sample['kind']!='best_bid_ask' or sample['token'] in store.ready_tokens) and sample['id']!=previous['identity']and sample['kind']in ('price_change','best_bid_ask')and(sample['bid'],sample['ask'])==previous['top']and 0<=received_ms-sample['source_ms']<=store.cfg.quote_age_seconds*1000 and 0<=received_ms-previous['persisted_ms']<15000 and price_confirmation_unchanged(store,sample):
                 store.seen_tops[sample['token']]=dict(previous,source_ms=sample['source_ms'],received_ms=received_ms,identity=sample['id'])
                 counters['coalesced_unchanged_top_confirmations']+=1;continue
             result = store.apply(sample)
@@ -91,13 +108,20 @@ def process(raw, received_ms, market, store, counters):
                 raise ValueError('INVALID_INPUT_BUDGET_EXHAUSTED')
 
 
-def observe(cfg, *, connect=None, stop=None, weather_fetch=None, lamp_fetch=None):
+def observe(cfg, *, connect=None, stop=None, weather_fetch=None, lamp_fetch=None, telegram_transport=None,
+            baseline_wait_seconds=None):
+    if baseline_wait_seconds is not None and (type(baseline_wait_seconds)is not int or not 1<=baseline_wait_seconds<=cfg.duration_seconds):
+        raise ValueError('BASELINE_WAIT_MUST_FIT_OBSERVATION_WINDOW')
+    baseline_wait=BASELINE_RECOVERY_SECONDS if baseline_wait_seconds is None else baseline_wait_seconds
     if connect is None:
         from websockets.sync.client import connect
     from websockets.exceptions import ConnectionClosed, InvalidStatus, WebSocketException
     stop = stop or threading.Event(); counters=Counter(); reason='COMPLETED_WINDOW'; exit_code=0
     deadline=time.monotonic()+cfg.duration_seconds
-    weather=None;lamp=None
+    weather=None;lamp=None;sender=None
+    if cfg.telegram_enabled:
+        from .telegram import Sender,post,token_from_env
+        sender=Sender(token_from_env(),telegram_transport or post)
     with Store(cfg) as store:
         logger=logging.getLogger('holy_weather');logger.setLevel(logging.INFO);logger.propagate=False
         handler=RotatingFileHandler(store.root/'monitor.log',maxBytes=524288,backupCount=2)
@@ -124,9 +148,10 @@ def observe(cfg, *, connect=None, stop=None, weather_fetch=None, lamp_fetch=None
                         while not stop.is_set() and time.monotonic()<deadline:
                             if datetime.now(timezone.utc).astimezone(ZoneInfo(market['timezone'])).date().isoformat()!=market['date']:
                                 reason='MARKET_LOCAL_DATE_ENDED';stop.set();break
+                            if sender:sender.tick(store,millis())
                             if weather:weather.tick(store,market,millis())
                             if lamp:lamp.tick(store,market,millis())
-                            if store.recovery_due(BASELINE_RECOVERY_SECONDS):
+                            if store.recovery_due(baseline_wait):
                                 raise BaselineRecoveryTimeout('BASELINE_NOT_CONFIRMED')
                             if time.monotonic()>=next_stats:
                                 health=store.observation_snapshot()['observation']['state']
@@ -173,7 +198,8 @@ def observe(cfg, *, connect=None, stop=None, weather_fetch=None, lamp_fetch=None
             result={'state':reason,'exit_code':exit_code,'elapsed_seconds':elapsed,'market':{k:v for k,v in market.items() if k!='rules'},
                     'counters':dict(counters),'storage':store.stats(),'growth_since_discovery_bytes':max(0,store.usage()-initial_bytes),
                     'process_disk_write_bytes':written-initial_writes if written is not None and initial_writes is not None else None,
-                    'weather_context_enabled':cfg.weather_context, 'lamp_context_enabled':cfg.lamp_context, 'own_model_or_trading_implemented':False}
+                    'weather_context_enabled':cfg.weather_context, 'lamp_context_enabled':cfg.lamp_context,
+                    'baseline_wait_seconds':baseline_wait,'own_model_or_trading_implemented':False}
             result['data_state']=result['storage']['observation']['state']
             if result['storage']['sqlite_integrity']!='ok' or result['storage']['foreign_key_errors']:
                 result.update(state='STORAGE_INTEGRITY_FAILURE',exit_code=4)
@@ -182,6 +208,7 @@ def observe(cfg, *, connect=None, stop=None, weather_fetch=None, lamp_fetch=None
             store.diagnostic('DISCOVERY_HTTP',str(exc.code),millis())
             return {'state':'DISCOVERY_DENIED' if exc.code in (401,403,429) else 'DISCOVERY_HTTP_ERROR','http':exc.code,'exit_code':2,'storage':store.stats()}
         finally:
+            if sender:sender.close(store)
             if weather:weather.close()
             if lamp:lamp.close()
             handler.close();logger.removeHandler(handler)

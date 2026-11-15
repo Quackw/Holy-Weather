@@ -64,6 +64,8 @@ def record(store,market,state,at):
                 discovery=store.c.execute("select input_id from latest where kind='discovery'").fetchone()
                 if discovery:refs.add(discovery[0])
                 for ref in refs:store.c.execute('insert into event_inputs values(?,?)',(ident,ref))
+                from .alert_queue import enqueue
+                enqueue(store,ident,event,market,at)
                 reason=event['reason']
         elif old_status=='OK':reason='INCOMPARABLE_REMAINING_HOURS'
         saved['previous']=state

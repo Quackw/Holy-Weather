@@ -13,6 +13,21 @@ def test_decimal():
     assert midpoint(None,'0.7') is None
     assert midpoint('0.8','0.7') is None
 
+
+def test_depth_update_before_full_bbo_does_not_hide_real_price_cross(cfg,market,make_raw):
+    with Store(replace(cfg,price_alert_enabled=True,alert_queue_enabled=True)) as s:
+        s.bind(market,{});s.connection_started(AT)
+        send(s,market,make_raw('0.49',AT,bid='0.47'),AT)
+        change=dict(event_type='price_change',market=market['condition_id'],timestamp=str(AT+10),price_changes=[
+            dict(asset_id=market['tokens']['YES'],side='BUY',price='0.60',size='25',best_bid='0.60',best_ask='0.62')])
+        send(s,market,change,AT+10)
+        assert not alerts(s)
+        send(s,market,make_raw('0.62',AT+10,bid='0.60'),AT+11)
+        assert len(alerts(s))==1 and alerts(s)[0]['thresholds']==['0.50','0.55','0.60']
+        send(s,market,make_raw('0.62',AT+20,bid='0.60'),AT+20)
+        assert len(alerts(s))==1
+        assert s.c.execute("select count(*) from meta where key like 'alert_delivery_v1:%'").fetchone()[0]==1
+
 def send(s,m,raw,at):
     process(json.dumps(raw),at,m,s,Counter())
 
