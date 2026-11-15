@@ -140,3 +140,47 @@ def test_wait_never_extends_price_expiry(cfg,market,make_raw):
         assert value(s,k)['expires_ms']==first['expires_ms']
         assert not claim(s,preview(s,k),AT+90002)
         assert value(s,k)['status']=='EXPIRED'
+
+
+@pytest.mark.parametrize('enabled',[False,True])
+def test_catalogue_cli_wires_policy(monkeypatch,tmp_path,capsys,enabled):
+    import sys
+    import holy_weather.catalogue as catalogue
+    seen=[]
+    def observe(cfg,**kwargs):seen.append(cfg);return {'state':'COMPLETED_WINDOW'}
+    monkeypatch.setattr(catalogue,'observe_catalogue',observe)
+    monkeypatch.setattr(sys,'argv',['catalogue','--data-dir',str(tmp_path),'--seconds','1']+(['--price-notification-filter'] if enabled else []))
+    assert catalogue.main()==0
+    assert seen[0].price_notification_filter is enabled
+    assert seen[0].telegram_enabled is False
+
+
+@pytest.mark.parametrize('level,bid,ask,later_bid,later_ask',[
+    ('0.70','0.56','0.85','0.57','0.84'),
+    ('0.80','0.697','0.952','0.698','0.935'),
+])
+def test_documents_lost_later_bid_confirmation(cfg,market,make_raw,level,bid,ask,later_bid,later_ask):
+    # Audit regression: this is a known acceptance blocker, not desired behavior.
+    with Store(cfg_on(cfg)) as s:
+        s.bind(market,{});s.connection_started(AT)
+        feed(s,market,make_raw,bid,str(__import__('decimal').Decimal(level)*2-__import__('decimal').Decimal(bid)-__import__('decimal').Decimal('.02')),AT)
+        feed(s,market,make_raw,bid,ask,AT+100)
+        feed(s,market,make_raw,later_bid,later_ask,AT+3000)
+        events=[json.loads(r[0]) for r in s.c.execute("select payload from events where type='PRICE_ALERT'")]
+        assert len(events)==1 and level in events[0]['thresholds']
+        assert events[0]['delivery_admission']['reason']=='ASK_ONLY_CROSSING'
+        assert keys(s)==[] # Once-only detector does not emit a later confirmation.
+
+
+def test_catalogue_enabled_policy_reaches_real_queue(gamma,tmp_path):
+    from test_catalogue import setup,feed as catalogue_feed
+    from holy_weather.catalogue import CatalogueStore,Router
+    cfg,markets=setup(gamma,tmp_path,2);cfg=replace(cfg,price_notification_filter=True)
+    with CatalogueStore(cfg) as s:
+        for m,r in markets:s.bind(m,r)
+        s.connection_started(AT);router=Router(s)
+        for m,_ in markets:
+            catalogue_feed(router,m,'0.49',AT+1);catalogue_feed(router,m,'0.56',AT+2)
+        assert len(keys(s))==2
+        for k in keys(s):assert value(s,k)['not_before_ms']==AT+30002
+        assert len({value(s,k)['batch_market'] for k in keys(s)})==2

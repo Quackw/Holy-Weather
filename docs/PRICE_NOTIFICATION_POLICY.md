@@ -23,3 +23,7 @@ Offline regressions cover baseline, multi-threshold events, bid growth, falling/
 ## Rollback
 
 Disable the option using this version to stop applying it to future events; existing pending batches still honor their stored delay and receipts. No database restore, threshold reset or history deletion. Before rolling code back to a pre-policy sender, finish or explicitly expire pending batches: old code understands the existing HTML/receipt but does not honor the additional wait field. UNKNOWN remains non-retryable. Remove the new configuration key before loading a configuration with pre-policy code. No runtime rollback was performed.
+
+## Acceptance hold
+
+The expanded review found lost later bid confirmations at 70/80%. See [acceptance review](PRICE_NOTIFICATION_REVIEW.md). PR 17 is BLOCKED for merge/deployment until this is resolved. `--price-notification-filter` now wires the option through the catalogue CLI; this does not authorize activation or change running wrappers.

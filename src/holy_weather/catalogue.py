@@ -421,9 +421,12 @@ def main():
     parser.add_argument('--data-dir',required=True)
     parser.add_argument('--seconds',type=int,default=120)
     parser.add_argument('--send',action='store_true')
+    parser.add_argument('--price-notification-filter',action='store_true',
+                        help='Suppress ask-only deliveries and batch same-bucket updates (30s)')
     args=parser.parse_args();stop=threading.Event()
     for sig in (signal.SIGINT,signal.SIGTERM):signal.signal(sig,lambda *_:stop.set())
-    cfg=CatalogueConfig(data_dir=args.data_dir,duration_seconds=args.seconds,telegram_enabled=args.send)
+    cfg=CatalogueConfig(data_dir=args.data_dir,duration_seconds=args.seconds,telegram_enabled=args.send,
+                        price_notification_filter=args.price_notification_filter)
     result=observe_catalogue(cfg,token=token_from_env() if args.send else None,stop=stop)
     print(json.dumps(result,ensure_ascii=False,sort_keys=True))
     return 0 if result['state']=='COMPLETED_WINDOW' else 2
