@@ -234,3 +234,12 @@ Future stages are planning only in `docs/ROADMAP.md`.
 Default-off durable PRICE/LAMP queue and short English previews: see
 [SHARED_TELEGRAM_QUEUE.md](docs/SHARED_TELEGRAM_QUEUE.md). Exact test previews
 require separate permission before sending. No production deployment.
+
+## European forecast-source qualification
+
+The approved next direction is **PRICE + FORECAST**, with NOAA LAMP in the US
+and an explicitly named qualified European source. Historical LAMP events are
+unchanged. See the [source audit](docs/EUROPE_SOURCE_AUDIT.md) and
+[bounded qualification plan](docs/EUROPE_SOURCE_QUALIFICATION_PLAN.md).
+These are readiness documents, not an activated European service. PR #12 remains
+DRAFT; no automatic merge or production rollout.
