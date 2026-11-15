@@ -25,7 +25,16 @@ US_CITIES = {'new-york': ('nyc', 'KLGA', 'America/New_York'),
 
 
 EUROPE_CITIES = {'london': ('london', 'EGLC', 'Europe/London'),
-                 'paris': ('paris', 'LFPB', 'Europe/Paris')}
+                 'paris': ('paris', 'LFPB', 'Europe/Paris'),
+                 'amsterdam': ('amsterdam', 'EHAM', 'Europe/Amsterdam'),
+                 'munich': ('munich', 'EDDM', 'Europe/Berlin'),
+                 'milan': ('milan', 'LIMC', 'Europe/Rome'),
+                 'madrid': ('madrid', 'LEMD', 'Europe/Madrid'),
+                 'warsaw': ('warsaw', 'EPWA', 'Europe/Warsaw'),
+                 'helsinki': ('helsinki', 'EFHK', 'Europe/Helsinki'),
+                 'moscow': ('moscow', 'UUWW', 'Europe/Moscow'),
+                 'istanbul': ('istanbul', 'LTFM', 'Europe/Istanbul'),
+                 'ankara': ('ankara', 'LTAC', 'Europe/Istanbul')}
 CITIES = {**US_CITIES, **EUROPE_CITIES}
 
 

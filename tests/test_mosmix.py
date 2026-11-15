@@ -1,6 +1,7 @@
 import io,zipfile
 import pytest
-from holy_weather.mosmix import decode
+from holy_weather.mosmix import decode,STATIONS
+from holy_weather.core import EUROPE_CITIES
 
 AT=1794744000000 # 2026-11-15T12:00Z
 
@@ -28,3 +29,15 @@ def test_missing_temperature_not_peak():assert run(body(values='- 284.15'))['fut
 
 def test_no_future_receipt():
     with pytest.raises(ValueError,match='CLOCK'):decode(body(),station='EGLC',requested_ms=AT,received_ms=AT+1,at_ms=AT)
+
+
+@pytest.mark.parametrize('city',EUROPE_CITIES)
+def test_exact_forecast_point_for_each_city(city):
+    _,station,zone=EUROPE_CITIES[city]
+    point,forecast_zone=STATIONS[station]
+    assert zone==forecast_zone
+    f=decode(body(point=point),station=station,requested_ms=AT-1,received_ms=AT,at_ms=AT)
+    assert f['station']==station and f['point_id']==point and f['future_peak_c']=='11.00'
+    assert f['alert_enabled'] is False
+    with pytest.raises(ValueError,match='IDENTITY'):
+        decode(body(point='WRONG'),station=station,requested_ms=AT-1,received_ms=AT,at_ms=AT)

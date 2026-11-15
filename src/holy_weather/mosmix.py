@@ -7,7 +7,12 @@ import xml.etree.ElementTree as ET
 from zoneinfo import ZoneInfo
 from .core import sha
 
-STATIONS={'EGLC':('P0478','Europe/London'),'LFPB':('07150','Europe/Paris')}
+STATIONS={'EGLC':('P0478','Europe/London'),'LFPB':('07150','Europe/Paris'),
+          'EHAM':('06240','Europe/Amsterdam'),'EDDM':('10870','Europe/Berlin'),
+          'LIMC':('16066','Europe/Rome'),'LEMD':('08221','Europe/Madrid'),
+          'EPWA':('12375','Europe/Warsaw'),'EFHK':('02974','Europe/Helsinki'),
+          'UUWW':('P0567','Europe/Moscow'),'LTFM':('F9731','Europe/Istanbul'),
+          'LTAC':('17128','Europe/Istanbul')}
 MAX_COMPRESSED=1024*1024
 MAX_XML=4*1024*1024
 

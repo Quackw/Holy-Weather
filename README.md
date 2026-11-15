@@ -237,7 +237,8 @@ require separate permission before sending. No production deployment.
 
 ## European extension (review branch)
 
-London/EGLC and Paris/LFPB PRICE + AWC context use Celsius contract rules.
+Ten verified European cities plus Ankara use Celsius PRICE + AWC context;
+exact stations and time zones are listed in docs/EUROPE_READINESS.md.
 Original DWD MOSMIX point forecasts have a bounded research decoder; European
 forecast alerts are not connected or freshness-qualified yet. NOAA LAMP is
 explicitly rejected for these cities. See [EUROPE_READINESS.md](docs/EUROPE_READINESS.md).

@@ -14,7 +14,7 @@ def european(gamma,city,bucket='13°C'):
     slug,station,zone=EUROPE_CITIES[city]
     doc=json.loads(json.dumps(gamma).replace('nyc',slug).replace('KLGA',station))
     m=doc[0]['markets'][0];m['groupItemTitle']=bucket
-    m['description']=m['description'].replace('Fahrenheit is','whole degrees Celsius is')
+    m['description']=m['description'].replace('Fahrenheit is','whole degrees Celsius is')+' ('+station+')'
     m['slug']=m['slug'].replace('46-47f','13c')
     return doc
 
@@ -57,3 +57,12 @@ def test_local_day_is_station_day(city,gamma,cfg):
     cfg=replace(cfg,city=city,bucket='13°C',date='2026-11-14')
     with pytest.raises(ValueError,match='LOCAL_DATE'):
         select(european(gamma,city),cfg,now=datetime(2026,11,15,0,1,tzinfo=timezone.utc))
+
+
+@pytest.mark.parametrize('city',EUROPE_CITIES)
+def test_rejects_conflicting_airport_in_rules(city,gamma,cfg):
+    cfg=replace(cfg,city=city,bucket='13°C')
+    doc=european(gamma,city)
+    doc[0]['markets'][0]['description']+=' Airport (EGLL)'
+    with pytest.raises(ValueError,match='RULE_STATION_CONFLICT'):
+        select(doc,cfg,now=NOW)

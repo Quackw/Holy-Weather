@@ -40,6 +40,10 @@ def select(document, cfg, *, now):
     unit = 'Celsius' if cfg.city in EUROPE_CITIES else 'Fahrenheit'
     required = (station, 'routine', 'METAR', 'local time', unit, 'rounded to the nearest whole degree')
     if cfg.city in EUROPE_CITIES:
+        # Reject contradictory airport references even when the expected ICAO
+        # is also present elsewhere in the rules or in the source URL.
+        if set(re.findall(r'\(([A-Z]{4})\)',description)) != {station}:
+            raise ValueError('EUROPE_RULE_STATION_CONFLICT')
         if 'whole degrees Celsius' not in description or 'whole Fahrenheit' in description or not re.fullmatch(r'-?\d+°C(?: or (?:below|higher))?',cfg.bucket):
             raise ValueError('UNREVIEWED_CELSIUS_BUCKET_OR_RULES')
     if not all(x in description for x in required) or 'half rounded up' not in description:
