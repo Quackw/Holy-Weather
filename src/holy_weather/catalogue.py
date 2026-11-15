@@ -283,7 +283,8 @@ class DayDiscovery:
                         raise ValueError('DISCOVERY_CITY_DATE_OR_RECEIPT_MISMATCH')
                 for market in markets:s.bind(market,receipt)
                 self.selected.update(m['condition_id'].lower() for m in markets)
-                state.update(status='VERIFIED' if markets else 'UNAVAILABLE')
+                invalid=any(x.get('reason') not in ('CONTRACT_NOT_OPEN','EXACT_EVENT_NOT_PUBLISHED') for x in skipped)
+                state.update(status='VERIFIED' if markets else 'BLOCKED' if invalid else 'UNAVAILABLE')
                 self.results[city]={'verified_buckets':len(markets),'skipped':skipped}
             except (OSError,ValueError,KeyError,TypeError) as exc:
                 from urllib.error import HTTPError

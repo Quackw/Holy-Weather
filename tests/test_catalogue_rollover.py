@@ -152,7 +152,7 @@ def test_denial_and_clock_regression_do_not_retry(gamma,tmp_path):
 
 
 @pytest.mark.parametrize('bad',['station','rules','tokens','date'])
-def test_new_day_real_gamma_verifier_rejects_invalid_contract(gamma,bad):
+def test_new_day_real_gamma_verifier_rejects_invalid_contract(gamma,tmp_path,bad):
     at=ms('2026-11-15T00:00:01+00:00');doc=doc_for(gamma,'london',at);m=doc[0]['markets'][0]
     if bad=='station':m['resolutionSource']=m['resolutionSource'].replace('EGLC','EGLL')
     if bad=='rules':m['description']+=' Changed settlement rule.'
@@ -165,6 +165,12 @@ def test_new_day_real_gamma_verifier_rejects_invalid_contract(gamma,bad):
         def read(self,n):return json.dumps(doc).encode()
     markets,receipt,skipped=discover_city('london',clock=lambda:datetime.fromtimestamp(at/1000,timezone.utc),fetch=lambda *a,**k:Response())
     assert not markets and len(skipped)==1 and receipt['raw_body']==json.dumps(doc)
+    cfg,_=setup(gamma,tmp_path,1)
+    with CatalogueStore(cfg) as s:
+        d=DayDiscovery(s,lambda c:(markets,receipt,skipped) if c=='london' else ([],{},[]),lambda:at)
+        d.refresh()
+        assert 'london' not in d.retry and not d.selected
+        assert json.loads(s.c.execute('select value from meta where key=?',(DAY_PREFIX+'london',)).fetchone()[0])['status']=='BLOCKED'
 
 
 def test_publication_delayed_then_recovers_without_resetting_budget(gamma,tmp_path):
