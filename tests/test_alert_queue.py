@@ -132,3 +132,66 @@ def test_short_cards_without_clock_or_technical_status(cfg,market,make_raw):
             assert 'UTC' not in html and 'Kyiv' not in html
             assert 'READY' not in html and 'N/A' not in html
             assert len(html.splitlines())==5
+
+
+@pytest.mark.parametrize('track',['PRICE_ALERT','LAMP_ALERT'])
+@pytest.mark.parametrize('legacy_expiry',[False,True])
+def test_claim_before_midnight_cannot_send_on_next_contract_day(cfg,market,make_raw,track,legacy_expiry):
+    from datetime import datetime,timedelta
+    from zoneinfo import ZoneInfo
+    midnight=int((datetime.fromisoformat(market['date'])+timedelta(days=1)).replace(
+        tzinfo=ZoneInfo(market['timezone'])).timestamp()*1000)
+    with Store(config(cfg))as s:
+        s.bind(market,{})
+        if track=='PRICE_ALERT':
+            at=midnight-1000;s.connection_started(at-1)
+            send(s,market,make_raw('0.49',at-1,bid='0.47'),at-1)
+            send(s,market,make_raw('0.62',at,bid='0.60'),at)
+        else:
+            at=midnight-3600001
+            put(s,market,[46]*25,at-1,issue=midnight-7200000)
+            put(s,market,[48]*25,at,issue=midnight-5400000)
+        key=keys(s)[0]
+        if legacy_expiry:
+            value=json.loads(s.c.execute('select value from meta where key=?',(key,)).fetchone()[0])
+            value['expires_ms']=midnight+90000
+            s.c.execute('update meta set value=? where key=?',(json.dumps(value),key))
+        p=preview(s,key)
+        assert json.loads(s.c.execute('select value from meta where key=?',(key,)).fetchone()[0])['track']==track
+        assert claim(s,p,midnight-1)
+        calls=[]
+        result=post('unused',p,clock=lambda:midnight,fetch=lambda *a,**k:calls.append(1))
+        assert result['status']=='REJECTED'
+        assert not calls
+
+
+def test_lamp_event_queue_and_forecast_rollback_together(cfg,market):
+    import sqlite3
+    with Store(config(cfg))as s:
+        s.bind(market,{});put(s,market,[46]*25,AT)
+        before=s.c.execute('select count(*) from inputs').fetchone()[0]
+        s.c.execute("CREATE TEMP TRIGGER abort_lamp_queue BEFORE INSERT ON meta WHEN NEW.key LIKE 'alert_delivery_v1:%' BEGIN SELECT RAISE(ABORT,'queue'); END")
+        with pytest.raises(sqlite3.IntegrityError):put(s,market,[48]*25,AT+1)
+        assert s.c.execute('select count(*) from inputs').fetchone()[0]==before
+        assert not keys(s)
+        assert not s.c.execute("select 1 from events where type='LAMP_ALERT'").fetchone()
+        s.c.execute('DROP TRIGGER abort_lamp_queue');put(s,market,[48]*25,AT+1)
+        assert len(keys(s))==1
+        assert not s.c.execute('pragma foreign_key_check').fetchall()
+
+
+def test_sender_failure_does_not_block_weather_or_lamp(cfg,market,make_raw):
+    from test_weather import receipt,report
+    def fail(token,p):raise TimeoutError()
+    with Store(config(cfg))as s:
+        seed(s,market,make_raw);sender=Sender('unused',fail)
+        sender.tick(s,AT+5);sender.thread.join(1);sender.tick(s,AT+6)
+        assert sender.stopped
+        s.record_weather(receipt([report(11)],received=AT+10),market,AT+11)
+        put(s,market,[50]*25,AT+20)
+        send(s,market,make_raw('0.72',AT+30,bid='0.70'),AT+30)
+        assert s.weather_status()=='OK'
+        assert len(keys(s))==4
+        assert s.c.execute("select count(*) from events where type='LAMP_ALERT'").fetchone()[0]==2
+        assert any(json.loads(r[0])['status']=='UNKNOWN' for r in s.c.execute('select value from meta where key like ?',(PREFIX+'%',)))
+        sender.close(s)

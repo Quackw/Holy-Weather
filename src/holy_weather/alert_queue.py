@@ -1,7 +1,7 @@
 """One durable, bounded queue for independent PRICE/LAMP events; no new schema."""
 import json
 from decimal import Decimal
-from datetime import datetime,timezone
+from datetime import datetime,timezone,timedelta
 from html import escape
 from urllib.parse import urlparse
 from .core import canonical,sha,CITIES
@@ -13,6 +13,12 @@ LIMIT=1024
 
 def num(v):return format(Decimal(str(v)).normalize(),'f')
 def stamp(ms):return datetime.fromtimestamp(ms/1000,timezone.utc).strftime('%H:%M:%S UTC')
+
+
+def day_expiry(expires,day,zone):
+    from zoneinfo import ZoneInfo
+    next_day=(datetime.fromisoformat(day)+timedelta(days=1)).replace(tzinfo=ZoneInfo(zone))
+    return min(expires,int(next_day.timestamp()*1000)-1)
 
 
 def card(event,market,at):
@@ -50,6 +56,8 @@ def enqueue(store,event_id,event,market,at):
         store.c.execute("insert or replace into meta values('alert_queue_status',?)",(canonical({'status':'FULL','limit':LIMIT}),));return
     html,expires=card(event,market,at)
     if event['type']=='PRICE_ALERT':expires=event['current']['source_ms']+store.cfg.quote_age_seconds*1000
+    # Keep the contract-day limit valid between claim and the final HTTP check.
+    expires=day_expiry(expires,market['date'],market['timezone'])
     value=dict(status='PENDING',track=event['type'],event_id=event_id,event_ms=at,html=html,
                expires_ms=expires,target=TARGET,market_date=market['date'],timezone=market['timezone'])
     store.c.execute('insert into meta values(?,?)',(key,canonical(value)))
@@ -60,7 +68,7 @@ def preview(store,key,*,test=False):
     if not row:raise ValueError('QUEUE_ENTRY_MISSING')
     v=json.loads(row[0]);body=dict(key=key,target=TARGET,event_id=v['event_id'],event_ms=v['event_ms'],
         html=('TEST · '+v['html']+'\nTEST · Preview only; not live market data.' if test else v['html']),
-        test=test,expires_ms=v['expires_ms'])
+        test=test,expires_ms=day_expiry(v['expires_ms'],v['market_date'],v['timezone']))
     return dict(body,preview_sha256=sha(body))
 
 
@@ -71,7 +79,7 @@ def claim(store,p,at):
         v=json.loads(store.c.execute('select value from meta where key=?',(p['key'],)).fetchone()[0])
         if v['status']!='PENDING':return False
         today=datetime.fromtimestamp(at/1000,timezone.utc).astimezone(ZoneInfo(v['timezone'])).date().isoformat()
-        if not p['test'] and (at<v['event_ms'] or at>v['expires_ms'] or today!=v['market_date']):
+        if not p['test'] and (at<v['event_ms'] or at>p['expires_ms'] or today!=v['market_date']):
             v.update(status='EXPIRED',completed_ms=at)
             store.c.execute('update meta set value=? where key=?',(canonical(v),p['key']));return False
         v.update(status='UNKNOWN',claimed_ms=at,preview_sha256=p['preview_sha256'])

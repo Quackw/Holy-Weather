@@ -62,6 +62,19 @@ PRICE/LAMP event was fabricated or attributed to a live market.
 Next: review PR D and approve exact test preview(s) before any outbound action.
 No automatic merge or deployment.
 
+## Final acceptance — 15 November 2026
+
+See [PR11_FINAL_ACCEPTANCE.md](PR11_FINAL_ACCEPTANCE.md) for the current
+272-test audit, bounded resource comparisons, fresh read-only Linux/Mac disk
+measurements and two regenerated short TEST previews. No messages were sent.
+
+A reproduced claim-before-midnight / HTTP-after-midnight defect was corrected.
+Both event types now cap the source-bound expiry at the end of the local
+contract day, including previews of legacy queue entries. Four expiry regressions
+and two failure/atomicity regressions were added. No schema, PRICE/LAMP trigger,
+freshness-budget or production changes. Acceptance requires green final-head CI;
+real TEST delivery remains a separately authorized next step.
+
 ## Finite live observation
 
 One explicitly approved 120-second Linux run completed with Telegram disabled.
