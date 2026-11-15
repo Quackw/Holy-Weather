@@ -3,13 +3,13 @@ import json
 import sqlite3
 import pytest
 from holy_weather.storage import Store
-from holy_weather.alert_queue import enqueue,preview,claim,finish
+from holy_weather.alert_queue import enqueue,preview,claim,finish,advance_waits
 from holy_weather.core import canonical
 from test_price_alert import send,AT
 from test_alert_queue import keys
 
 
-def cfg_on(cfg):return replace(cfg,price_alert_enabled=True,alert_queue_enabled=True,price_notification_filter=True)
+def cfg_on(cfg):return replace(cfg,price_alert_enabled=True,alert_queue_enabled=True,price_notification_filter=True,price_confirmation_seconds=5)
 def feed(s,m,make,bid,ask,at,side='YES'):
     send(s,m,make(ask,at,bid=bid,token=m['tokens'][side]),at)
 def value(s,k):return json.loads(s.c.execute('select value from meta where key=?',(k,)).fetchone()[0])
@@ -21,9 +21,11 @@ def seed(s,m,make):
 def test_ask_only_retained_not_sent(cfg,market,make_raw):
     with Store(cfg_on(cfg)) as s:
         seed(s,market,make_raw);feed(s,market,make_raw,'0.48','0.64',AT+1)
-        assert keys(s)==[]
+        assert value(s,keys(s)[0])['status']=='WAITING_BID'
+        advance_waits(s,AT+5001)
+        assert value(s,keys(s)[0])['status']=='REJECTED'
         e=json.loads(s.c.execute("select payload from events where type='PRICE_ALERT'").fetchone()[0])
-        assert e['delivery_admission']['reason']=='ASK_ONLY_CROSSING'
+        assert e['delivery_admission']['reason']=='WAITING_BID'
         assert e['thresholds']==['0.50','0.55']
         assert s.c.execute('select count(*) from event_inputs').fetchone()[0]>0
 
@@ -35,9 +37,9 @@ def test_bid_growth_batches_sides_restart_and_finality(cfg,market,make_raw):
         feed(s,market,make_raw,'0.59','0.61',AT+1000)
         feed(s,market,make_raw,'0.48','0.50',AT+2000,'NO')
         feed(s,market,make_raw,'0.51','0.53',AT+21000,'NO')
-        assert len(keys(s))==1;k=keys(s)[0];v=value(s,k)
-        assert len(v['event_ids'])==3 and v['not_before_ms']==AT+30001
-        p=preview(s,k);assert 'Both sides moved' in p['html']
+        assert len(keys(s))==2;k=next(k for k in keys(s) if value(s,k)['side']=='YES');v=value(s,k)
+        assert len(v['event_ids'])==2 and v['not_before_ms']==AT+30001
+        p=preview(s,k);assert 'Both sides moved' not in p['html'] and 'NO midpoint' not in p['html']
         assert not claim(s,p,AT+29000)
     with Store(cfg) as s:
         p=preview(s,k);assert claim(s,p,AT+30001)
@@ -129,7 +131,7 @@ def test_disabled_policy_can_read_existing_group_without_duplicate(cfg,market,ma
 def test_demand_growth_vs_ask_only(cfg,market,make_raw,bid,ask,allowed):
     with Store(cfg_on(cfg)) as s:
         seed(s,market,make_raw);feed(s,market,make_raw,bid,ask,AT+1)
-        assert bool(keys(s))==allowed
+        assert (value(s,keys(s)[0])['status']=='PENDING')==allowed
 
 
 def test_wait_never_extends_price_expiry(cfg,market,make_raw):
@@ -160,7 +162,7 @@ def test_catalogue_cli_wires_policy(monkeypatch,tmp_path,capsys,enabled):
     ('0.80','0.697','0.952','0.698','0.935'),
 ])
 def test_documents_lost_later_bid_confirmation(cfg,market,make_raw,level,bid,ask,later_bid,later_ask):
-    # Audit regression: this is a known acceptance blocker, not desired behavior.
+    # Later bid changes delivery only; original event and fired threshold remain once-only.
     with Store(cfg_on(cfg)) as s:
         s.bind(market,{});s.connection_started(AT)
         feed(s,market,make_raw,bid,str(__import__('decimal').Decimal(level)*2-__import__('decimal').Decimal(bid)-__import__('decimal').Decimal('.02')),AT)
@@ -168,8 +170,8 @@ def test_documents_lost_later_bid_confirmation(cfg,market,make_raw,level,bid,ask
         feed(s,market,make_raw,later_bid,later_ask,AT+3000)
         events=[json.loads(r[0]) for r in s.c.execute("select payload from events where type='PRICE_ALERT'")]
         assert len(events)==1 and level in events[0]['thresholds']
-        assert events[0]['delivery_admission']['reason']=='ASK_ONLY_CROSSING'
-        assert keys(s)==[] # Once-only detector does not emit a later confirmation.
+        assert events[0]['delivery_admission']['reason']=='WAITING_BID'
+        assert value(s,keys(s)[0])['confirmation']=='CONFIRMED' # Delivery changes, not event.
 
 
 def test_catalogue_enabled_policy_reaches_real_queue(gamma,tmp_path):

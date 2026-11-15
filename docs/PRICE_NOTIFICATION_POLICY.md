@@ -1,29 +1,23 @@
-# PRICE notification filter (candidate; not deployed)
+# PRICE delivery policy — PR 17, opt-in, not deployed
 
-PRICE detection remains the accepted Decimal midpoint, upward 50/55/60/70/80 thresholds, once per market/side/threshold, REARM=false. Original events and input references are unchanged. LAMP delivery is independent.
+The PRICE detector is unchanged: Decimal midpoint, upward 50/55/60/70/80%, once-only, REARM=false. Delivery never creates a replacement PRICE event or changes fired thresholds. LAMP remains independent.
 
-Enable `price_notification_filter = true` explicitly in configuration for a future deployment. Default false preserves current runtime behavior and existing configuration hashes. No running observer was changed by this PR.
+Enable `price_notification_filter` explicitly (catalogue CLI `--price-notification-filter`). Default OFF preserves existing runtime. `price_confirmation_seconds` supports 5, 8, 10; candidate default **8 seconds**. On the fixed saved history 8 retained one additional low-threshold confirmation compared with 5; 10 added none. This is not statistical optimization or evidence of demand/profit.
 
-## Delivery rules
+## Bounded delivery state
 
-1. A PRICE crossing whose current best bid is not above its previous best bid is retained with `delivery_admission: NOT_QUEUED / ASK_ONLY_CROSSING`. Given an upward midpoint crossing, its increase came from ask. No probability or demand claim is inferred.
-2. Eligible events for the same exact market URL (same date and bucket) share a pending card for a fixed 30-second window from its first event. YES and NO remain separate lines; if both move the card says `Both sides moved`. Thresholds and all constituent event IDs remain recorded. This is batching, not cancellation of an opposite side.
-3. The window never slides. At most ten constituent PRICE events (five once-only thresholds per side). No merge into claimed UNKNOWN or final receipts. No merging across markets, dates or into LAMP.
-4. The oldest constituent price expiry is retained; merging cannot extend freshness. Waiting ends earlier if necessary, one second before expiry. An expired batch cannot be sent. Sender selects other ready entries while a PRICE batch waits.
-5. Queue capacity still counts unresolved entries. A full queue may merge into an already pending compatible batch without allocating another slot. Otherwise refusal is recorded per event. Group state and new event are committed atomically.
+- An upward crossing without bid growth creates a normal original PRICE event and a durable `WAITING_BID` queue row. Its original expiry, token, source time, bid and thresholds are retained. It counts toward the existing 1024 unresolved-entry bound.
+- Only a later received, later source-time, fresh confirmed book/BBO for the **same token**, with bid above the crossing bid and midpoint at least the highest crossed threshold, confirms delivery. A small bid increase is only a mechanical condition.
+- The confirming input is linked through `event_inputs` and recorded on the queue row; original PRICE payload/prices and fired state are not rewritten. Confirmation and its input reference commit together with the input transaction.
+- Timeout below 70% becomes explicit `REJECTED / NO_BID_CONFIRMATION_WITHIN_WINDOW`. Timeout containing 70/80% becomes a pending compact card with **Ask-only · not confirmed by bid**. A later quote never upgrades that final confirmation decision.
+- GAP, restart, invalid continuity, market resolution and expiry prevent revival. Their outcome is durable and explicit. No waiting state is carried across a new connection as a confirmation opportunity. UNKNOWN is never retried.
+- Compatible unclaimed notifications group by exact bucket/date **and side** in a fixed 30-second window, maximum ten event references. YES and NO are separate cards. Original event IDs, constituent delivery outcomes and confirmation evidence remain available; absorbed rows retain `MERGED` and the owning queue key.
+- Oldest source/receipt expiry and local midnight still govern every card. Waiting/batching cannot extend the 90-second limit. No merge into SENT/UNKNOWN, across sides, or with LAMP. Warning text survives grouping. Queue-full refusal remains explicit per event; final rows do not consume unresolved capacity.
 
-`event_ids` on the queue row lists all constituents; each later event's admission includes `queue_key`. Delivery audits must follow that key rather than assume one row per event. All admitted and refused event evidence remains protected by existing retention rules. No schema migration, service, dependency or storage-budget increase.
+No new schema, dependency, service, weather logic, PRICE thresholds or storage limits.
 
-## Evidence and limits
+## Rollback / compatibility
 
-Saved delivered-event queue replay (not raw WebSocket replay, and no actual Telegram sends): 21 historical delivered PRICE events become 8 candidate cards. Twelve ask-only crossings are retained but not queued; the other nine bid-growing events are represented exactly once. One pair of Atlanta YES/NO events shares a card. Source evidence SHA is unchanged. Repeat replay is deterministic. This does not establish profitability or the usefulness of every retained bid change. Small bid changes, wide spreads and later oscillations outside the window can still alert. The 30-second batching latency is an explicit tradeoff.
+Schema remains v1 and accepted rule hash is preserved. Disable the filter using this version to stop new waiting admissions; durable existing states keep their rules. Session restart explicitly rejects unconfirmed waiting entries, preserving evidence. SENT/UNKNOWN remain non-repeatable. Tests cover rollback by configuration without restoring any database.
 
-Offline regressions cover baseline, multi-threshold events, bid growth, falling/unchanged bid, both sides, fixed window, expiry, restart, unknown sends, capacity, LAMP independence, transaction failure, evidence retention and disabling the feature. SQLite integrity/foreign keys and schema v1 checked.
-
-## Rollback
-
-Disable the option using this version to stop applying it to future events; existing pending batches still honor their stored delay and receipts. No database restore, threshold reset or history deletion. Before rolling code back to a pre-policy sender, finish or explicitly expire pending batches: old code understands the existing HTML/receipt but does not honor the additional wait field. UNKNOWN remains non-retryable. Remove the new configuration key before loading a configuration with pre-policy code. No runtime rollback was performed.
-
-## Acceptance hold
-
-The expanded review found lost later bid confirmations at 70/80%. See [acceptance review](PRICE_NOTIFICATION_REVIEW.md). PR 17 is BLOCKED for merge/deployment until this is resolved. `--price-notification-filter` now wires the option through the catalogue CLI; this does not authorize activation or change running wrappers.
+Before returning to pre-policy code, all WAITING_BID and batched pending work must be explicitly finalized using this version: older senders do not understand its timing/grouping. Remove new config keys for old code. Never restore an old database, reset thresholds, or retry UNKNOWN. No live rollback/deployment occurred.

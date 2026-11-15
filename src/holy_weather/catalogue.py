@@ -148,7 +148,7 @@ class CatalogueStore(Store):
         return today==market['date'] and not self.c.execute('select 1 from meta where key=?',('market_closed:'+condition,)).fetchone()
 
     def expire_closed_deliveries(self, at, selected=None):
-        rows=self.c.execute("select key,value from meta where key like 'alert_delivery_v1:%' and json_extract(value,'$.status')='PENDING'").fetchall()
+        rows=self.c.execute("select key,value from meta where key like 'alert_delivery_v1:%' and json_extract(value,'$.status') in ('PENDING','WAITING_BID')").fetchall()
         expired=[]
         for row in rows:
             value=json.loads(row['value'])
@@ -422,7 +422,7 @@ def main():
     parser.add_argument('--seconds',type=int,default=120)
     parser.add_argument('--send',action='store_true')
     parser.add_argument('--price-notification-filter',action='store_true',
-                        help='Suppress ask-only deliveries and batch same-bucket updates (30s)')
+                        help='Wait for ask-only bid confirmation and batch same-side bucket updates (30s)')
     args=parser.parse_args();stop=threading.Event()
     for sig in (signal.SIGINT,signal.SIGTERM):signal.signal(sig,lambda *_:stop.set())
     cfg=CatalogueConfig(data_dir=args.data_dir,duration_seconds=args.seconds,telegram_enabled=args.send,

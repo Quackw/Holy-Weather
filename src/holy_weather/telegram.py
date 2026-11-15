@@ -48,6 +48,8 @@ class Sender:
         self.minimum_interval_ms=minimum_interval_ms;self.next_send_ms=0
         self.token=token;self.transport=transport;self.thread=None;self.results=queue.Queue(maxsize=1);self.stopped=False
     def tick(self,store,at):
+        from .alert_queue import advance_waits
+        advance_waits(store,at)
         try:
             p,r,completed=self.results.get_nowait()
         except queue.Empty:pass
