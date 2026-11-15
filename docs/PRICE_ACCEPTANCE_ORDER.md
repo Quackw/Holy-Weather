@@ -95,6 +95,9 @@ restart. Do not loosen source-order checks merely to hide reorder suppressions.
 
 ## Gaps that prevent permanent PRICE READY
 
+At the stage-0 snapshot (later stage-1 changes are recorded in
+PRICE_GROUP_RECOVERY_REVIEW.md):
+
 The catalogue is Europe-only, while accepted US monitoring remains single-market;
 all-city US catalogue support is not already implemented. Catalogue network gaps
 stop the finite run: it does not inherit the single-market recovery loop. Closed

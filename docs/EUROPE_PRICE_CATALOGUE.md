@@ -101,3 +101,12 @@ proved transport/deduplication, not a special American clock policy.
 
 The earlier proposed server manifest `bfa60016…faadf01` predates this change and
 must not be used as the corrected package. No server execution or send occurred.
+
+## Stage 1 recovery candidate (supersedes the initial no-reconnect description)
+
+PR 14 now honours the existing Config.max_reconnects budget within the finite
+window. It re-establishes baselines and retains fired thresholds, unsubscribes
+ended markets, and refuses protocol/oversized-frame retries. This changes only
+the review candidate, not earlier packages or the separately running session.
+See [group recovery review](PRICE_GROUP_RECOVERY_REVIEW.md) and
+[clock/order review](PRICE_CLOCK_ORDER_REVIEW.md). No permanent readiness claimed.

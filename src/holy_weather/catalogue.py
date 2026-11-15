@@ -193,15 +193,15 @@ def discover_city(city, *, clock=None, fetch=None):
 
 
 def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=None, token=None,
-                      clock=None, monotonic=time.monotonic, stop=None):
-    """One finite session. No reconnect, rollover, service or credential discovery."""
+                      clock=None, monotonic=time.monotonic, stop=None, wait=None):
+    """Finite session with configured reconnect budget; no rollover or service."""
     import threading
     from websockets.exceptions import WebSocketException
     from .app import WS,millis
     from .telegram import Sender
     if connect is None:
         from websockets.sync.client import connect
-    clock=clock or millis;stop=stop or threading.Event()
+    clock=clock or millis;stop=stop or threading.Event();wait=wait or stop.wait
     if cfg.telegram_enabled and not token:raise ValueError('EXPLICIT_TELEGRAM_TOKEN_REQUIRED')
     sender=Sender(token,**({'transport':transport} if transport else {}),minimum_interval_ms=3100) if cfg.telegram_enabled else None
     result={'cities':{},'state':'PREPARING','telegram_enabled':cfg.telegram_enabled,'weather_enabled':False}
@@ -226,35 +226,70 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
             router=Router(store,selected)
             deadline=monotonic()+cfg.duration_seconds
             result['state']='COMPLETED_WINDOW'
-            try:
-                with connect(WS,proxy=None,open_timeout=10,close_timeout=2,ping_interval=10,ping_timeout=20,
-                             max_size=262144,max_queue=16,compression=None) as ws:
-                    store.connection_started(clock())
-                    ws.send(canonical({'type':'market','assets_ids':tokens[:16],'custom_feature_enabled':True}))
-                    subscribed=16;next_subscription=monotonic()+1
-                    last_ping=monotonic();last_pong=last_ping;next_stats=last_ping
-                    while not stop.is_set() and monotonic()<deadline:
-                        at=clock()
-                        if subscribed<len(tokens) and monotonic()>=next_subscription:
-                            ws.send(canonical({'operation':'subscribe','assets_ids':tokens[subscribed:subscribed+16],'custom_feature_enabled':True}))
-                            subscribed+=16;next_subscription=monotonic()+1
-                        if not any(store.active(c,at) for c in selected):
+            reconnects=0
+            while not stop.is_set() and monotonic()<deadline:
+                tokens=[t for t,c in store.tokens.items() if c in selected and store.active(c,clock())]
+                if not tokens:
+                    result['state']='ALL_MARKETS_CLOSED_OR_LOCAL_DATE_ENDED';break
+                try:
+                    with connect(WS,proxy=None,open_timeout=10,close_timeout=2,ping_interval=10,ping_timeout=20,
+                                 max_size=262144,max_queue=16,compression=None) as ws:
+                        tokens=[t for t in tokens if store.active(store.tokens[t],clock())]
+                        if not tokens:
                             result['state']='ALL_MARKETS_CLOSED_OR_LOCAL_DATE_ENDED';break
-                        store.expire_closed_deliveries(at)
-                        if sender:sender.tick(store,at)
-                        if monotonic()>=next_stats:
-                            store.set_meta('catalogue_counters',{'router':dict(router.counters),'markets':{k:dict(v) for k,v in router.per_market.items()}})
-                            next_stats=monotonic()+10
-                        if monotonic()-last_pong>25:raise TimeoutError('APPLICATION_HEARTBEAT_TIMEOUT')
-                        if monotonic()-last_ping>=10:ws.send('PING');last_ping=monotonic()
-                        try:raw=ws.recv(timeout=min(1,max(.01,deadline-monotonic())))
-                        except TimeoutError:continue
-                        if raw=='PONG':last_pong=monotonic();continue
-                        router.feed(raw,clock())
-            except (OSError,TimeoutError,WebSocketException) as exc:
-                result.update(state='NETWORK_GAP_NO_RETRY',error=type(exc).__name__,detail=str(exc)[:240])
-            finally:
-                store.gap('CATALOGUE_SESSION_ENDED',clock())
+                        store.connection_started(clock())
+                        ws.send(canonical({'type':'market','assets_ids':tokens[:16],'custom_feature_enabled':True}))
+                        subscribed=min(16,len(tokens));live_tokens=set(tokens[:16]);next_subscription=monotonic()+1
+                        last_ping=monotonic();last_pong=last_ping;next_stats=last_ping
+                        while not stop.is_set() and monotonic()<deadline:
+                            at=clock()
+                            if subscribed<len(tokens) and monotonic()>=next_subscription:
+                                batch=[t for t in tokens[subscribed:subscribed+16] if store.active(store.tokens[t],at)]
+                                if batch:ws.send(canonical({'operation':'subscribe','assets_ids':batch,'custom_feature_enabled':True}))
+                                live_tokens.update(batch)
+                                subscribed+=16;next_subscription=monotonic()+1
+                            if not any(store.active(c,at) for c in selected):
+                                result['state']='ALL_MARKETS_CLOSED_OR_LOCAL_DATE_ENDED';break
+                            closed=sorted(t for t in live_tokens if not store.active(store.tokens[t],at))
+                            for start in range(0,len(closed),16):
+                                ws.send(canonical({'operation':'unsubscribe','assets_ids':closed[start:start+16]}))
+                            live_tokens.difference_update(closed)
+                            store.expire_closed_deliveries(at)
+                            if sender:sender.tick(store,at)
+                            if monotonic()>=next_stats:
+                                store.set_meta('catalogue_counters',{'router':dict(router.counters),'markets':{k:dict(v) for k,v in router.per_market.items()}})
+                                next_stats=monotonic()+10
+                            if monotonic()-last_pong>25:raise TimeoutError('APPLICATION_HEARTBEAT_TIMEOUT')
+                            if monotonic()-last_ping>=10:ws.send('PING');last_ping=monotonic()
+                            try:raw=ws.recv(timeout=min(1,max(.01,deadline-monotonic())))
+                            except TimeoutError:continue
+                            if raw=='PONG':last_pong=monotonic();continue
+                            router.feed(raw,clock())
+                except (OSError,TimeoutError,WebSocketException) as exc:
+                    store.gap('CATALOGUE_NETWORK_GAP',clock())
+                    result.update(error=type(exc).__name__,detail=str(exc)[:240])
+                    # Denied access / protocol and oversized-frame errors are not
+                    # transient outages. Never bypass them through reconnects.
+                    from websockets.exceptions import ConnectionClosed
+                    close=getattr(exc,'rcvd',None) or getattr(exc,'sent',None)
+                    transient=isinstance(exc,(OSError,TimeoutError,ConnectionClosed))
+                    if close is not None and close.code in (1008,1009):transient=False
+                    if not transient:
+                        result['state']='NETWORK_REFUSED_NO_RETRY';break
+                    if reconnects>=cfg.max_reconnects:
+                        result['state']='NETWORK_GAP_NO_RETRY' if not cfg.max_reconnects else 'RECONNECT_BUDGET_EXHAUSTED';break
+                    delay=min(2**reconnects,8,max(0,deadline-monotonic()))
+                    if delay<=0:
+                        result['state']='DEADLINE_DURING_GAP';break
+                    reconnects+=1
+                    if wait(delay):break
+                    if monotonic()>=deadline:
+                        result['state']='DEADLINE_DURING_GAP';break
+                    continue
+                else:
+                    break
+            store.gap('CATALOGUE_SESSION_ENDED',clock())
+            result['reconnects']=reconnects
             if sender:sender.close(store)
             if stop.is_set():result['state']='SIGNAL_STOP'
             result['counters']={'router':dict(router.counters),'markets':{k:dict(v) for k,v in router.per_market.items()}}
