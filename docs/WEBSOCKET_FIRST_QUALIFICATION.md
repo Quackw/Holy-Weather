@@ -145,3 +145,7 @@ deduplication rule was weakened to manufacture PASS.
 Evidence remains outside Git under `evidence/ws-first-20261115/`. Source SQLite
 SHA256: `2ef65e05851c5d139d2070b287d468bdf74c026c24502cdab40e02dbe599faeb`;
 gzip capture SHA256: `a84a93111de35810f8e8bfc96e0f46cd3e25d98caf4b4a0a21d5ae4b7c27ef86`.
+
+The metadata-only choice used in that completed run is superseded by
+[native active-contract selection](ACTIVE_CONTRACT_SELECTION.md). The old capture
+and its PARTIAL result are preserved; no different market is substituted into it.
