@@ -76,3 +76,53 @@ not depth changes; midpoint thresholds and once-only consumption are unchanged.
 No alert is created by the depth message itself. The existing 6,000-message
 ON/OFF storage regression still checks 40 saved samples and the same write/size
 bounds. This is a reproduced ingestion defect, not a change of strategy.
+
+## Real qualification, 15 November 2026
+
+The user approved exactly manifest
+`174fb4b3ba39e0e6225cb68aa8c3ef5ce9a57e530a1a46c96d950f9577f52b60`,
+source commit `0473ba5f56d88e0176c911d565bc06960a8f6146`. One isolated run on
+`v2202609428928530766` completed without a retry, reconnect, service change,
+REST-book request or Telegram request. Its owned directory is
+`/var/tmp/holy-weather-active-selection-8qzd9d7t`; the original and returned
+artifacts are preserved, not deleted. Raw evidence remains outside Git under
+`evidence/active-selection-20261115/`.
+
+| Check | Observed result |
+| --- | --- |
+| Gamma and rules | HTTP 200; 11 open, verified New York/KLGA candidates for local day 2026-11-15 |
+| Native selection | SELECTED in 9.617 seconds, 13 frames; both sides had full baselines followed by a newer native confirmation |
+| Selected contract | New York, 50–51°F; condition `0xa0dbe3fee7d4d5150fe546669480a2e72a1a140df99b388469650f0b8f5c1633` |
+| Separate observation | 05:52:52.472–05:54:53.506 UTC; a new connection and new baselines; 120-second collection window, 121.013 seconds including shutdown |
+| Native messages | 2 full books, 28 depth-update messages, 154 unrelated market announcements |
+| YES top | Bid 74¢ / ask 75¢; midpoint 74.5¢ throughout all 29 own-token confirmations |
+| NO top | Bid 25¢ / ask 26¢; midpoint 25.5¢ throughout all 29 own-token confirmations |
+| Source and receipt clocks | Full initial books arrived 2,226 ms after source time; subsequent confirmations 12–14 ms; last quote source age at end 8,751 ms |
+| PRICE events / queue entries / sends | 0 / 0 / 0: neither midpoint crossed an upward threshold; no placeholder notification |
+| Economical recording | 10 samples saved; 48 unchanged confirmations coalesced; 13 total inputs |
+| AWC | One native HTTP 200 response in 257 ms, no injected timeout and no retry |
+| Weather coverage | MISSING for the new market day: all 27 returned observations belong to local 14 November; latest is 04:51 UTC = 23:51 EST on 14 November |
+| LAMP context | Native bulletin received; issue 05:30 UTC, remaining-day peak 48°F; observed maximum and remaining warming stay missing |
+| Storage | Closed SQLite 106,496 bytes; observation capture 44,909 bytes gzip / 507,822 bytes raw; selection capture 8,599 bytes gzip / 64,984 bytes raw |
+| Integrity and provenance | All 16 returned artifact SHA values verified; SQLite integrity `ok`, foreign-key errors 0, schema version 1 unchanged |
+| Replay | Two cold selector replays match selection/counters; two cold observation replays match each other and live event semantics; source artifacts unchanged |
+
+The actual quote-selection and refresh objective is **PASS**. The combined
+price/weather qualifier honestly remains **PARTIAL**, because an HTTP-successful
+AWC response did not yet contain an observation on the new local market day.
+The saved response proves that coverage gap; it does not establish why the
+provider had not returned a later observation. Previous-day weather is not
+substituted as today's observation or maximum. The earlier controlled AWC
+timeout/recovery proof remains separate; no new recovery is claimed here.
+
+The stream is closed after this finite test. Its final persisted connection
+status is `CONNECTION_UNCONFIRMED`, even though the last prices were younger
+than 90 seconds at test end. This is evidence of a completed bounded window,
+not a claim of a currently running healthy monitor. There was no real alert
+to preview or send, and this run does not prove Telegram delivery or trading
+advantage. PRICE and LAMP rules and the 90-second limit are unchanged.
+
+The source commit passed all **266** offline tests and Linux GitHub Actions
+[run 43682446529](https://github.com/Quackw/Holy-Weather/actions/runs/43682446529).
+This evidence-only update does not change the tested application code. PR #11
+remains open and unmerged.
