@@ -1,6 +1,6 @@
 # HOLY WEATHER
 
-Private, independent Python monitor. Stage 1 observes **one explicitly selected
+Private, independent Python monitor. The accepted finite monitor observes **one explicitly selected
 temperature contract, both YES/NO tokens**, using Gamma and Polymarket's official
 public market stream. It stores typed quotes, raw evidence, events and suppression
 reasons in its own SQLite. No account or trading credentials are needed.
@@ -10,9 +10,9 @@ reasons in its own SQLite. No account or trading credentials are needed.
 **One project, two independent algorithms, one Telegram bot:**
 
 - **📈 PRICE ALERT** — upward price-threshold crossings, not outcome prediction.
-  Target Netflix rules: 50/55/60/70/80%, Decimal midpoint of the actual side's
-  bid and ask, once per market/side/threshold, no rearm. Exact parity with
-  @holy_nfx_bot must be verified against the original implementation before code.
+  Implemented PRICE rules: 50/55/60/70/80%, Decimal midpoint of the actual side's
+  bid and ask, once per market/side/threshold, no rearm. Acceptance must remain
+  pinned to the reviewed @holy_nfx_bot source rules.
 - **☀️ LAMP ALERT** — independently triggered by original forecast revisions:
   verified bucket-boundary crossings or a significant remaining-peak change.
 
@@ -21,9 +21,16 @@ remain unchanged and are **not** the Netflix algorithm. No winner/lock strategy
 is part of the product. See [STRATEGY.md](docs/STRATEGY.md) and
 [ROADMAP.md](docs/ROADMAP.md) for implementation and acceptance gates.
 
-Telegram [PR #5](https://github.com/Quackw/Holy-Weather/pull/5) remains unmerged
-pending adaptation to the two message types. Its single approved test delivery
-is not production activation or proof of a durable shared queue.
+The shared durable Telegram queue was accepted in PR #11. PRICE and LAMP have
+separate event/deduplication state and short English cards. Authorized TEST sends
+and two real Amsterdam PRICE deliveries have been confirmed; this does not imply
+permanent deployment. PR #5 remains historical groundwork, not the current queue.
+
+**Current work: stage 0 audit, then PRICE acceptance first.** PRs #12–14 are draft;
+#14 depends on #12, while #13 source research is deferred. See
+[verified acceptance order](docs/PRICE_ACCEPTANCE_ORDER.md). No forecast expansion
+or next stage begins automatically. Existing explicitly authorized finite runs
+are separate from main and from production readiness.
 
 ## Run
 
@@ -68,7 +75,7 @@ different state. SIGINT/SIGTERM stop safely; there is no restart daemon.
 preview and touches only this application's owned SQLite. Referenced evidence
 and latest snapshots are protected. No source data from other projects is opened.
 
-## Rules and data
+## Legacy research events and shared data
 
 * Ask movement at least 10¢ over at most 15 minutes.
 * Up/down transitions of `ask >= 50/70/90¢`, with configurable cooldown and 2¢
@@ -106,7 +113,7 @@ runtime dependency. See [docs/QUALIFICATION.md](docs/QUALIFICATION.md).
 Stage 2 optionally adds observed KLGA weather context as described below.
 Stage 3 optionally adds original hourly LAMP context as described below.
 Own forecast models, production installation and a 48-hour supervisor
-remain outside the implementation. Telegram is separate work in PR #5, not part of main. Price alerts
+remain outside the implementation. The shared Telegram queue is accepted in PR #11. Price alerts
 establish neither warming accuracy nor trading advantage. No orders are placed.
 
 
@@ -116,7 +123,8 @@ establish neither warming accuracy nor trading advantage. No orders are placed.
 .venv/bin/holy-weather observe --config config.weather.example.toml
 ```
 
-Only New York/KLGA is supported. Gamma still verifies the station and market
+This stage originally qualified New York/KLGA; the accepted ten-city extension
+below adds the other US profiles. Gamma still verifies the station and market
 rules before the weather worker starts. The official AWC METAR JSON endpoint
 returns up to 24 hours for KLGA. A request runs at most every five minutes in one
 bounded HTTP thread; only the main loop writes SQLite. A failed/denied/invalid
@@ -229,7 +237,7 @@ change the 90-second quote freshness limit. See
 `docs/STREAM_RECOVERY_20261114.md` for failure tests and the 13 recorded incidents.
 Future stages are planning only in `docs/ROADMAP.md`.
 
-## Shared Telegram queue (PR D)
+## Shared Telegram queue (accepted PR #11)
 
 Default-off durable PRICE/LAMP queue and short English previews: see
 [SHARED_TELEGRAM_QUEUE.md](docs/SHARED_TELEGRAM_QUEUE.md). Exact test previews
@@ -242,4 +250,5 @@ exact stations and time zones are listed in docs/EUROPE_READINESS.md.
 Original DWD MOSMIX point forecasts have a bounded research decoder; European
 forecast alerts are not connected or freshness-qualified yet. NOAA LAMP is
 explicitly rejected for these cities. See [EUROPE_READINESS.md](docs/EUROPE_READINESS.md).
-No European production deployment or sends.
+No European production deployment. Separately authorized finite PRICE experiments
+have sent real cards; these are not forecast qualification or permanent readiness.

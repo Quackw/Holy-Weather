@@ -1,51 +1,41 @@
-# Roadmap — gated PRICE / LAMP delivery
+# Roadmap — PRICE first, independent FORECAST second
 
-One project, two notification algorithms, one bot. [Strategy](STRATEGY.md) is the
-source of product rules. No third winner/lock strategy. No automatic merges,
-production changes, deployments, real orders or Telegram sends.
+One project, two independent alert directions, one Telegram bot. No LOCK,
+probability model, automatic orders or additional services. PRICE thresholds
+and once-only rules remain fixed. Accepted US LAMP remains intact while forecast
+expansion is deferred. See [stage 0 audit](PRICE_ACCEPTANCE_ORDER.md).
 
-## PR A — concept correction (current task)
+## Accepted foundation
 
-Update README, AGENTS, STRATEGY and this roadmap only. Preserve all runtime and
-historical evidence. Close superseded PR #7 without deleting its branch; retain
-its independent LAMP comparison for later review. Keep PR #5 open and unmerged.
-**Stop after PR A and await acceptance.**
+PRs 1–4: finite market/weather/LAMP context and US city profiles.
+PR 8: two-alert concept; PR 9: PRICE; PR 10: independent KLGA LAMP;
+PR 11: shared durable queue, short cards and delivery handling.
+PRs 5/7 are preserved historical/superseded work, not pending prerequisites.
 
-## PR B — PRICE ALERT (after A acceptance)
+## Sequential acceptance gates
 
-Inspect original @holy_nfx_bot source/version and verify midpoint, threshold and
-rearm rules before writing code. Resolve mismatches explicitly. Build the small
-independent Decimal detector without changing existing research events. Test
-upward 50/55/60/70/80 crossings, MULTI-CROSS, each side's exact token, missing quotes,
-baselines, stale/out-of-order data, gaps, duplicates and restart with durable
-one-time threshold state/events. Verify SQLite compatibility and rollback. One
-New York contract first. No Telegram sends. Await acceptance before PR C.
+0. **Current:** audit main and drafts 12/13/14; repair documentation; prepare
+   stage 1. Stop for acceptance. No runtime changes.
+1. Verify PRICE rules, bounded clock policy using Mac/Linux source evidence,
+   reordered messages, batch subscriptions, gaps, restart and resource limits.
+2. Accept the PRICE foundation from PR 12 with forecast research separated;
+   qualify London/Paris/Amsterdam, then the other eight profiles individually.
+3. Finish PR 14 after PR 12: all verified buckets, one writer/queue, bounded
+   subscriptions, per-side state, delivery accounting and measured resources.
+4. Accept PRICE Telegram evidence: atomic queue, exact links, fresh delivery,
+   restart dedupe, UNKNOWN handling and collection despite sender failure.
+   Existing approved deliveries count as evidence; repeat sends need no invention.
+5. Separately design daily rollover, recovery, storage and delivery monitoring;
+   request authorization for bounded daily qualification before permanent service.
+6. Only after PRICE acceptance: resume PR 13 European source research and verify
+   original sequential forecasts, station mapping, licensing and resource costs.
+7. Implement qualified European FORECAST in the existing second direction;
+   retain NOAA LAMP in the US, separate source identity and Celsius thresholds.
+8. Qualify both independent directions together, including daily boundaries,
+   outages and resource use. No trading.
 
-## PR C — independent LAMP ALERT (after B acceptance)
-
-Reuse original LAMP ingestion and suitable PR #7 comparison logic, without its
-removed strategy. Freeze the proposed 2°F peak-change configuration before tests;
-verified boundary crossings independently qualify. Test matched remaining hours,
-causality, first issue, duplicates, corrections, stale/missing data, restart and
-weather-triggered events with unchanged prices. Use genuine saved bulletins;
-report absent real changes honestly, separating synthetic cases. No new model.
-Await acceptance before PR D.
-
-## PR D — one durable Telegram queue (after C acceptance)
-
-Adapt PR #5 groundwork to 📈 PRICE ALERT / ☀️ LAMP ALERT. Persist both event types,
-separate dedupe and reasons; verify pending restart recovery, expiry, confirmed
-send suppression and explicit UNKNOWN delivery. Keep collection independent of
-sender failures. Show short English previews with exact bucket links; technical
-baselines/suppressions remain journal-only. Request separate approval before real
-messages. Do not merge PR #5 as-is or assume its recent-event polling is a durable
-shared queue.
-
-## After combined one-city acceptance
-
-Consider the other nine supported cities and a bounded live qualification under
-separate authorization. Measure storage, gaps, delays and independent algorithm
-quality. No permanent service or 48-hour deployment is implied by these PRs.
-
-Each PR report: changes; real versus synthetic evidence; test count; SQLite and
-false-alert/restart checks; GitHub CI; PR link; next gated step.
+Each gate reports code/tests, immutable replay, live quotes/events, actual delivery
+and resources separately. Stop before PR acceptance; the next gate needs user
+acceptance and authorization. Do not merge automatically. Do not delete branches,
+source history or evidence. Existing finite session permission is not permission
+for production/systemd, tomorrow's contracts or additional Telegram TEST messages.
