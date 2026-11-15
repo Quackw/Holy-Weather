@@ -234,3 +234,11 @@ Future stages are planning only in `docs/ROADMAP.md`.
 Default-off durable PRICE/LAMP queue and short English previews: see
 [SHARED_TELEGRAM_QUEUE.md](docs/SHARED_TELEGRAM_QUEUE.md). Exact test previews
 require separate permission before sending. No production deployment.
+
+## European extension (review branch)
+
+London/EGLC and Paris/LFPB PRICE + AWC context use Celsius contract rules.
+Original DWD MOSMIX point forecasts have a bounded research decoder; European
+forecast alerts are not connected or freshness-qualified yet. NOAA LAMP is
+explicitly rejected for these cities. See [EUROPE_READINESS.md](docs/EUROPE_READINESS.md).
+No European production deployment or sends.

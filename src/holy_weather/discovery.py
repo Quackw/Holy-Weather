@@ -5,7 +5,7 @@ import re
 from urllib.parse import urlencode, urlparse, parse_qs
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
-from .core import CITIES, sha
+from .core import CITIES, EUROPE_CITIES, sha
 
 GAMMA = 'https://gamma-api.polymarket.com/events'
 
@@ -37,7 +37,11 @@ def select(document, cfg, *, now):
     parsed = urlparse(source)
     if parsed.scheme != 'https' or parsed.netloc != 'aviationweather.gov' or parsed.path != '/api/data/metar' or parse_qs(parsed.query).get('ids') != [station]:
         raise ValueError('UNSUPPORTED_RESOLUTION_SOURCE_OR_STATION')
-    required = (station, 'routine', 'METAR', 'local time', 'Fahrenheit', 'rounded to the nearest whole degree')
+    unit = 'Celsius' if cfg.city in EUROPE_CITIES else 'Fahrenheit'
+    required = (station, 'routine', 'METAR', 'local time', unit, 'rounded to the nearest whole degree')
+    if cfg.city in EUROPE_CITIES:
+        if 'whole degrees Celsius' not in description or 'whole Fahrenheit' in description or not re.fullmatch(r'-?\d+°C(?: or (?:below|higher))?',cfg.bucket):
+            raise ValueError('UNREVIEWED_CELSIUS_BUCKET_OR_RULES')
     if not all(x in description for x in required) or 'half rounded up' not in description:
         raise ValueError('UNREVIEWED_RULES')
     stamp = f"{date.day} {months[date.month-1][:3].title()} '{date.year%100:02d}"
