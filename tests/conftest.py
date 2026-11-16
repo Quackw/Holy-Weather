@@ -2,6 +2,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 import json
 import pytest
+from ci_stacks import pytest_addoption, pytest_configure, pytest_runtest_protocol, pytest_unconfigure
 from holy_weather.core import Config
 from holy_weather.discovery import select
 

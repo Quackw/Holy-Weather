@@ -24,6 +24,8 @@ jobs:
       - name: Build pinned wheel
         run: python -m pip wheel --index-url https://pypi.org/simple --no-deps --wheel-dir "$RUNNER_TEMP/holy-weather-dist" .
       - run: python -B tools/check_source.py
-      - run: python -B -m pytest -q -o faulthandler_timeout=30
+      - name: Finite stdlib traceback-race qualification
+        run: python -B tools/ci_stack_probe.py
+      - run: python -B -m pytest -q --ci-stack-seconds=30 -o faulthandler_timeout=0
         env:
           HOLY_WEATHER_WEBSOCKETS_ROLLBACK_DIR: ${{ runner.temp }}/websockets-17.1
