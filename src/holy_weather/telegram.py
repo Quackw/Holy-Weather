@@ -48,6 +48,8 @@ class Sender:
         self.minimum_interval_ms=minimum_interval_ms;self.next_send_ms=0
         self.token=token;self.transport=transport;self.thread=None;self.results=queue.Queue(maxsize=1);self.stopped=False
     def tick(self,store,at):
+        from .alert_queue import advance_waits
+        advance_waits(store,at)
         try:
             p,r,completed=self.results.get_nowait()
         except queue.Empty:pass
@@ -55,7 +57,7 @@ class Sender:
             finish(store,p,r,completed)
             if r['status']!='SENT':self.stopped=True
         if self.stopped or (self.thread and self.thread.is_alive()) or at<self.next_send_ms:return
-        row=store.c.execute("select key from meta where key like ? and json_extract(value,'$.status')='PENDING' order by json_extract(value,'$.event_ms'),key limit 1",(PREFIX+'%',)).fetchone()
+        row=store.c.execute("select key from meta where key like ? and json_extract(value,'$.status')='PENDING' and coalesce(json_extract(value,'$.not_before_ms'),0)<=? order by coalesce(json_extract(value,'$.priority'),0) desc,json_extract(value,'$.event_ms'),key limit 1",(PREFIX+'%',at)).fetchone()
         if not row:return
         p=preview(store,row[0])
         if not claim(store,p,at):return

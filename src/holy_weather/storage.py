@@ -173,6 +173,8 @@ class Store:
         previous_tops=dict(self.seen_tops)
         self.seen_tops.clear()
         with self.transaction():
+            from .alert_queue import settle_waits
+            settle_waits(self,at,gap=reason)
             for row in self.c.execute('select token,payload from state').fetchall():
                 state=reset(json.loads(row['payload']))
                 state['high_source']=max(state['high_source'],previous_tops.get(row['token'],{}).get('source_ms',-1))
@@ -187,6 +189,8 @@ class Store:
                   (set(json.loads(bound[0])['tokens'].values()) if bound else set()))
         with self.transaction():
             for target in targets:
+                from .alert_queue import settle_waits
+                settle_waits(self,at,gap=reason,token=target)
                 row=self.c.execute('select payload from state where token=?',(target,)).fetchone()
                 if row:
                     state=reset(json.loads(row[0]))
@@ -220,6 +224,12 @@ class Store:
                                  (sample['id'], sample['received_ms'], compressed, sha(raw)))
             input_id = cur.lastrowid
             if sample['kind'] == 'market_resolved':
+                from .alert_queue import settle_waits
+                condition=str(sample['raw'].get('market',sample['raw'].get('condition_id',''))).lower()
+                waiting=self.c.execute("select distinct json_extract(value,'$.token') from meta where key like 'alert_delivery_v1:%' and json_extract(value,'$.status')='WAITING_BID'").fetchall()
+                for row in waiting:
+                    if self.market_for_token(row[0])['condition_id'].lower()==condition:
+                        settle_waits(self,sample['received_ms'],gap='MARKET_RESOLVED',token=row[0])
                 self.c.execute("insert or replace into meta values(?,'true')",(self.closed_key(sample),))
                 return {'status': 'MARKET_RESOLVED', 'events': []}
             if self.c.execute("select 1 from meta where key=?",(self.closed_key(sample),)).fetchone():
@@ -262,6 +272,8 @@ class Store:
             if self.cfg.price_alert_enabled:
                 from .price_alert import record
                 events += record(self,sample,status)
+                from .alert_queue import settle_waits
+                settle_waits(self,sample['received_ms'],sample=sample,status=status)
             result={'status': status, 'events': events,'raw_bytes':len(raw),'compressed_bytes':len(compressed)}
         # Readiness changes only after the input/state transaction commits.
         if quote:

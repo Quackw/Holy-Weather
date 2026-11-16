@@ -19,6 +19,25 @@ PREFIX = 'price_catalogue_v1:'
 DAY_PREFIX = 'price_catalogue_day_v1:'
 
 
+# The library already owns the receiver thread. It only updates two scalar
+# clocks here; the main thread remains the sole SQLite writer.
+from websockets.sync.client import ClientConnection
+from websockets.frames import Frame,PONG
+
+class TimedClientConnection(ClientConnection):
+    native_last_pong_ms=None
+    def process_event(self,event):
+        super().process_event(event)
+        if isinstance(event,Frame) and event.opcode is PONG:
+            self.native_last_pong_ms=time.time_ns()//1_000_000
+
+
+def native_timing(ws):
+    latency=getattr(ws,'latency',None)
+    return {'native_last_pong_ms':getattr(ws,'native_last_pong_ms',None),
+            'native_rtt_ms':round(latency*1000,3) if isinstance(latency,(int,float)) and latency>0 else None}
+
+
 def local_days(at):
     now=datetime.fromtimestamp(at/1000,timezone.utc)
     return {city:now.astimezone(ZoneInfo(v[2])).date().isoformat() for city,v in EUROPE_CITIES.items()}
@@ -147,8 +166,25 @@ class CatalogueStore(Store):
         today=datetime.fromtimestamp(at/1000,timezone.utc).astimezone(ZoneInfo(market['timezone'])).date().isoformat()
         return today==market['date'] and not self.c.execute('select 1 from meta where key=?',('market_closed:'+condition,)).fetchone()
 
+    def transport_record(self,record=None,snapshot=None):
+        """Small durable history independent of the rotating per-message diagnostics."""
+        row=self.c.execute("select value from meta where key='catalogue_transport_v1'").fetchone()
+        value=json.loads(row[0]) if row else {'sequence':0,'counts':{},'recent':[]}
+        if record is not None:
+            record=dict(record)
+            if snapshot is not None:record['snapshot']=dict(snapshot)
+            for key in ('detail','error','state'):
+                if key in record:record[key]=str(record[key])[:240]
+            value['sequence']+=1;record['sequence']=value['sequence']
+            kind=record['kind'];value['counts'][kind]=value['counts'].get(kind,0)+1
+            value['recent']=(value['recent']+[record])[-32:]
+        if snapshot is not None:value['snapshot']=snapshot
+        with self.transaction():
+            self.c.execute("insert or replace into meta values('catalogue_transport_v1',?)",(canonical(value),))
+        return value
+
     def expire_closed_deliveries(self, at, selected=None):
-        rows=self.c.execute("select key,value from meta where key like 'alert_delivery_v1:%' and json_extract(value,'$.status')='PENDING'").fetchall()
+        rows=self.c.execute("select key,value from meta where key like 'alert_delivery_v1:%' and json_extract(value,'$.status') in ('PENDING','WAITING_BID')").fetchall()
         expired=[]
         for row in rows:
             value=json.loads(row['value'])
@@ -324,6 +360,7 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
             router=Router(store,selected)
             result['state']='COMPLETED_WINDOW'
             reconnects=0
+            telemetry={}
             while not stop.is_set() and monotonic()<deadline:
                 if days.due():
                     store.gap('LOCAL_DAY_OR_DISCOVERY_REFRESH',clock())
@@ -337,17 +374,26 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
                     if wait(min(1,max(0,deadline-monotonic()))):break
                     continue
                 result['state']='COMPLETED_WINDOW'
+                telemetry={'attempt':reconnects+1,'connect_started_ms':clock(),'subscribed_tokens':0,'frames':0,'max_frame_bytes':0,
+                           'processing_ms_total':0,'processing_ms_max':0,'maintenance_ms_max':0,
+                           'application_last_pong_ms':None,'application_last_ping_ms':None,'last_frame_ms':None}
+                store.transport_record({'kind':'CONNECTING','at_ms':clock(),'attempt':reconnects+1},telemetry)
+                ws=None
                 try:
                     with connect(WS,proxy=None,open_timeout=10,close_timeout=2,ping_interval=10,ping_timeout=20,
-                                 max_size=262144,max_queue=16,compression=None) as ws:
+                                 max_size=262144,max_queue=16,compression=None,create_connection=TimedClientConnection) as ws:
                         tokens=[t for t in tokens if store.active(store.tokens[t],clock())]
                         if days.due():continue
                         if not tokens:
                             result['state']='ALL_MARKETS_CLOSED_OR_LOCAL_DATE_ENDED';break
                         store.connection_started(clock())
+                        telemetry['connected_ms']=clock()
+                        store.transport_record({'kind':'CONNECTED','at_ms':clock(),'attempt':reconnects+1},telemetry)
                         ws.send(canonical({'type':'market','assets_ids':tokens[:16],'custom_feature_enabled':True}))
                         subscribed=min(16,len(tokens));live_tokens=set(tokens[:16]);next_subscription=monotonic()+1
+                        telemetry['subscribed_tokens']=len(live_tokens)
                         last_ping=monotonic();last_pong=last_ping;next_stats=last_ping
+                        next_maintenance=last_ping
                         while not stop.is_set() and monotonic()<deadline:
                             at=clock()
                             if days.due():break
@@ -355,25 +401,47 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
                                 batch=[t for t in tokens[subscribed:subscribed+16] if store.active(store.tokens[t],at)]
                                 if batch:ws.send(canonical({'operation':'subscribe','assets_ids':batch,'custom_feature_enabled':True}))
                                 live_tokens.update(batch)
+                                telemetry['subscribed_tokens']=len(live_tokens)
                                 subscribed+=16;next_subscription=monotonic()+1
-                            if not any(store.active(c,at) for c in selected):
-                                result['state']='ALL_MARKETS_CLOSED_OR_LOCAL_DATE_ENDED';break
-                            closed=sorted(t for t in live_tokens if not store.active(store.tokens[t],at))
-                            for start in range(0,len(closed),16):
-                                ws.send(canonical({'operation':'unsubscribe','assets_ids':closed[start:start+16]}))
-                            live_tokens.difference_update(closed)
+                            if monotonic()>=next_maintenance:
+                                maintenance_start=monotonic()
+                                if not any(store.active(c,at) for c in selected):
+                                    result['state']='ALL_MARKETS_CLOSED_OR_LOCAL_DATE_ENDED';break
+                                closed=sorted(t for t in live_tokens if not store.active(store.tokens[t],at))
+                                for start in range(0,len(closed),16):
+                                    ws.send(canonical({'operation':'unsubscribe','assets_ids':closed[start:start+16]}))
+                                live_tokens.difference_update(closed)
+                                telemetry['subscribed_tokens']=len(live_tokens)
+                                telemetry['maintenance_ms_max']=max(telemetry['maintenance_ms_max'],round((monotonic()-maintenance_start)*1000,3))
+                                next_maintenance=monotonic()+.25
+                            # Queue eligibility must see lifecycle changes on every
+                            # turn, including between throttled global scans.
                             store.expire_closed_deliveries(at)
                             if sender:sender.tick(store,at)
                             if monotonic()>=next_stats:
                                 store.set_meta('catalogue_counters',{'router':dict(router.counters),'markets':{k:dict(v) for k,v in router.per_market.items()}})
+                                telemetry['subscribed_tokens']=len(live_tokens)
+                                telemetry.update(native_timing(ws))
+                                store.transport_record(snapshot=telemetry)
                                 next_stats=monotonic()+10
                             if monotonic()-last_pong>25:raise TimeoutError('APPLICATION_HEARTBEAT_TIMEOUT')
-                            if monotonic()-last_ping>=10:ws.send('PING');last_ping=monotonic()
+                            if monotonic()-last_ping>=10:
+                                ws.send('PING');last_ping=monotonic();telemetry['application_last_ping_ms']=clock()
                             try:raw=ws.recv(timeout=min(1,max(.01,deadline-monotonic())))
                             except TimeoutError:continue
-                            if raw=='PONG':last_pong=monotonic();continue
-                            router.feed(raw,clock())
+                            if raw=='PONG':
+                                last_pong=monotonic();telemetry['application_last_pong_ms']=clock();continue
+                            telemetry['last_frame_ms']=clock()
+                            telemetry['frames']+=1
+                            telemetry['max_frame_bytes']=max(telemetry['max_frame_bytes'],len(raw.encode()) if isinstance(raw,str) else len(raw))
+                            processing_start=monotonic()
+                            try:router.feed(raw,clock())
+                            finally:
+                                elapsed=round((monotonic()-processing_start)*1000,3)
+                                telemetry['processing_ms_total']+=elapsed
+                                telemetry['processing_ms_max']=max(telemetry['processing_ms_max'],elapsed)
                 except (OSError,TimeoutError,WebSocketException) as exc:
+                    telemetry.update(native_timing(ws))
                     store.gap('CATALOGUE_NETWORK_GAP',clock())
                     result.update(error=type(exc).__name__,detail=str(exc)[:240])
                     # Denied access / protocol and oversized-frame errors are not
@@ -382,6 +450,9 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
                     close=getattr(exc,'rcvd',None) or getattr(exc,'sent',None)
                     transient=isinstance(exc,(OSError,TimeoutError,ConnectionClosed))
                     if close is not None and close.code in (1008,1009):transient=False
+                    store.transport_record({'kind':'DISCONNECTED','at_ms':clock(),'attempt':reconnects+1,
+                        'error':type(exc).__name__,'detail':str(exc),'close_code':close.code if close else None,
+                        'transient':transient},telemetry)
                     if not transient:
                         result['state']='NETWORK_REFUSED_NO_RETRY';break
                     if reconnects>=cfg.max_reconnects:
@@ -390,6 +461,7 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
                     if delay<=0:
                         result['state']='DEADLINE_DURING_GAP';break
                     reconnects+=1
+                    store.transport_record({'kind':'RECONNECT_SCHEDULED','at_ms':clock(),'attempt':reconnects+1,'delay_seconds':delay},telemetry)
                     if wait(delay):break
                     if monotonic()>=deadline:
                         result['state']='DEADLINE_DURING_GAP';break
@@ -399,8 +471,10 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
                     break
             store.gap('CATALOGUE_SESSION_ENDED',clock())
             result['reconnects']=reconnects
+            if telemetry.get('connected_ms'):telemetry.update(native_timing(ws))
             if sender:sender.close(store)
             if stop.is_set():result['state']='SIGNAL_STOP'
+            result['transport']=store.transport_record({'kind':'STOPPED','at_ms':clock(),'state':result['state'],'reconnects':reconnects},telemetry)
             result['counters']={'router':dict(router.counters),'markets':{k:dict(v) for k,v in router.per_market.items()}}
             result['price_events']=store.c.execute("select count(*) from events where type='PRICE_ALERT'").fetchone()[0]
             result['deliveries']={r[0]:r[1] for r in store.c.execute("select json_extract(value,'$.status'),count(*) from meta where key like 'alert_delivery_v1:%' group by 1")}
@@ -421,9 +495,13 @@ def main():
     parser.add_argument('--data-dir',required=True)
     parser.add_argument('--seconds',type=int,default=120)
     parser.add_argument('--send',action='store_true')
+    parser.add_argument('--price-notification-filter',action='store_true',
+                        help='Fast 70/80 delivery, ask-only bid confirmation, and ordinary same-side batches')
+    parser.add_argument('--price-batch-seconds',type=int,choices=(10,15,30),default=10)
     args=parser.parse_args();stop=threading.Event()
     for sig in (signal.SIGINT,signal.SIGTERM):signal.signal(sig,lambda *_:stop.set())
-    cfg=CatalogueConfig(data_dir=args.data_dir,duration_seconds=args.seconds,telegram_enabled=args.send)
+    cfg=CatalogueConfig(data_dir=args.data_dir,duration_seconds=args.seconds,telegram_enabled=args.send,
+                        price_notification_filter=args.price_notification_filter,price_batch_seconds=args.price_batch_seconds)
     result=observe_catalogue(cfg,token=token_from_env() if args.send else None,stop=stop)
     print(json.dumps(result,ensure_ascii=False,sort_keys=True))
     return 0 if result['state']=='COMPLETED_WINDOW' else 2
