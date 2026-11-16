@@ -1,23 +1,72 @@
 # HOLY WEATHER development rules
 
-This private project is independent of POLYMETEO. PRs 1–4 and 8–11 are accepted: PRICE, original LAMP and the shared durable Telegram queue exist. Current priority is PRICE acceptance for US and European markets; FORECAST/LAMP expansion is deferred. Stages 0 and 1 are accepted. PR 12 is accepted and merged. Current task: reconcile PR 14 with the accepted PRICE-only main and prepare it for review without changing active observation. Forecast experiments are preserved on codex/europe-weather-experiments-preserved, not included in this PRICE PR. Follow docs/PRICE_ACCEPTANCE_ORDER.md and docs/ROADMAP.md. PR 13 remains deferred; PR 14 targets main and remains unmerged. No automatic merge or production changes. Existing specifically authorized finite observations retain their exact scope; this audit does not stop, expand or redeploy them.
+HOLY WEATHER is independent of POLYMETEO. Reconciled against accepted runtime main
+`937d3bc` (16 November 2026, PR #22); inspect fresh GitHub state before acting.
+The repository is currently public. Accepted source is not the installed version
+of any existing observer.
 
-- Use codex/ branches and small reviewable PRs. No automatic merges or deployments.
-- No winner/lock strategy, own weather models, probabilities, trading, new services or production changes. Never change POLYMETEO or share its working databases.
-- Before PRICE code, verify actual @holy_nfx_bot source rules. Required specification: Decimal midpoint of real side token bid/ask; upward 50/55/60/70/80% crossings; one MULTI-CROSS per update; once per market/side/threshold; REARM=false. First confirmed quote is baseline. Never silently substitute ask/trade or call the existing 50/70/90 engine Netflix parity.
-- LAMP events are driven by new bulletins independently of price. Compare identical remaining hours; first issue is baseline; repeated downloads do not alert. Preserve causal clocks, original data, gaps and suppression reasons. Propose/freeze a configured material-change threshold before tests.
-- Share data and eventual durable delivery queue, but separate PRICE/LAMP event states, evidence and dedupe keys. Confirmed sends cannot repeat; uncertain sends remain explicit. Telegram failure must not block collection. No new sends without separate preview verification and permission.
-- PR #7 is superseded; preserve its branch/evidence and reusable LAMP logic, never merge its discarded strategy. PR #5 stays unmerged until the new notification design is accepted. Follow PR A → B → C → D, each accepted before starting the next.
-- Keep bid, ask, trade, source time and receipt time distinct. Missing is not zero.
-- New connection/restart is a baseline, never an inferred crossing. Preserve gaps and suppression reasons.
-- One SQLite writer. Preserve event evidence and state; bound data, WAL, logs and memory. No automatic VACUUM.
-- Tests are offline and synthetic in CI. Real evidence stays outside Git. Record provenance for research replay.
-- Run pytest, compile checks and the documented finite Linux/live qualification. Separate code, tests, live observation and scientific claims.
-- Stop on permission refusal or unknown write state. No credential/account fallback or silent limit increases.
+The product has exactly two independent notification algorithms: PRICE ALERT and
+LAMP ALERT, sharing data/queue implementation and one Telegram bot. Current
+priority is PRICE qualification. The regional catalogue is PRICE-only: one codebase
+for Europe (11 profiles) and US (10), separate data directories and rule identities.
+Accepted optional US weather/LAMP in the single-contract observer remains intact;
+forecast expansion is deferred.
 
-## Acceptance before declaring a city ready
+PRs 1–4, 8–12 and 14–22 are accepted, including queue capacity, local-day rollover,
+notification filtering, no-sender timers, regional reconciliation, websockets 17.4
+and research-bound isolation. PR #13/European forecast experiments remain deferred
+on `codex/europe-weather-experiments-preserved`. PRs #5/#7 are historical/superseded,
+not prerequisites to merge. Preserve their branches/evidence and discarded strategy.
+See [README](README.md), [ARCHITECTURE](ARCHITECTURE.md) and [ROADMAP](docs/ROADMAP.md).
+Old PR reports are historical evidence, not current acceptance gates.
 
-- Reproduce a reported defect before fixing it; retain an offline regression that fails on the old behavior. Check the producer, stored state, consumer and restart boundary, not just a helper function.
-- Keep rule/station/source verification, quote readiness, weather readiness, forecast readiness and delivery evidence separate. Green CI or HTTP 200 alone is not city readiness.
-- Qualify PRICE separately from forecasts: verified rules/station, native quotes, clocks, durable queue and restart/deduplication are required. Any authorized city notice must state PRICE-only when forecasts are unqualified; forecast qualification must not block independent PRICE acceptance. Never announce disabled features as working.
-- Preserve the small existing architecture. Use bounded tests and the existing writer/queue; no new services, dependencies, storage limits or production rollout as a shortcut to acceptance.
+- Use `codex/` branches and small reviewable PRs. Merge only with explicit user
+  authorization. No deployment, service/process/settings change or new live run
+  is implied by accepted code or an earlier finite observation.
+- Never change POLYMETEO, other projects or their working databases. No LOCK,
+  own Tmax models, probabilities, trading or additional services.
+- Before changing PRICE code, verify actual retained `@holy_nfx_bot` source rules
+  and record provenance. Use Decimal midpoint of the real side token bid/ask,
+  upward 50/55/60/70/80 crossings, one MULTI-CROSS per update, once per
+  market/side/threshold, REARM=false. Missing is not zero. Never substitute ask,
+  trade or the opposite token. Legacy 50/70/90 ask research is not Netflix parity.
+- First confirmed quote after startup/GAP/restart is a baseline. Preserve fired
+  levels, source high-water, raw clocks, input references and explicit refusals.
+  Research-only ENGINE_POINT_BOUND cannot reset valid PRICE readiness; retain its
+  original sample status. Real invalidity, expiry and gaps still block PRICE.
+- LAMP uses original new bulletins independently of price, comparing identical
+  remaining hours. First issue is baseline; duplicate downloads do not alert.
+  Preserve issue/receipt/availability clocks and the configured 2°F threshold.
+  Do not silently expand sources or change thresholds/units.
+- PRICE/LAMP state, evidence and dedupe namespaces stay separate. Event, fired
+  state, evidence and queue admission commit atomically. Never resend SENT or
+  blindly retry UNKNOWN. Telegram failure must not stop collection; SQLite
+  failures remain critical. Follow exact preview and current user send authority.
+- The filter is opt-in. Preserve priority 70/80 without ordinary batch delay,
+  maximum eight-second ask-only wait, explicit fallback/refusal reasons and
+  ten-second default ordinary grouping. Delivery never creates PRICE events,
+  rearms levels, extends expiry or mixes sides/contracts/dates/tracks.
+- One SQLite writer per owned directory. Preserve schema v1, new history,
+  thresholds and delivery receipts through compatible code rollback. Never
+  restore an old database over new records. No automatic VACUUM, prune, archive
+  or cleanup. Explicit maintenance needs matching version/config and authority.
+- Keep the 90-second quote limit, maximum 100-ms catalogue source lead, 256-MiB
+  per-directory budget and 1024 unresolved-work bound. Terminal receipts remain.
+  Bound WAL/logs/memory; do not raise limits or claim indefinite storage.
+- Tests are offline/synthetic. Real evidence, credentials, databases and backups
+  stay outside Git. Reproduce defects before fixing them; check producer, stored
+  state, consumer, restart and rollback. Run pytest/source/compile checks and
+  inspect Linux CI (Python 3.11 and 3.13.5). Add only meaningful regressions.
+- Stop on permission refusal or unknown write outcome. Do not silently switch
+  credentials/identities, bypass denied control actions, reset attempts or retry
+  uncertain operations. Do not automatically change GitHub visibility/protection.
+
+## Acceptance boundaries
+
+Keep code/tests, replay, live quotes, actual Telegram ACK and resource evidence
+separate. Green CI or HTTP 200 alone is not city readiness. Qualify PRICE
+independently of weather. A finite run or historical delivery does not prove the
+current build operates autonomously. Catalogue local-day rollover exists within
+its finite deadline; no permanent supervisor exists. Qualify current contracts,
+live rollover/recovery, delivery and long-run storage before separately authorized
+deployment. Documentation changes do not alter these permissions.

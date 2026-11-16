@@ -1,262 +1,135 @@
 # HOLY WEATHER
 
-Private, independent Python monitor. The accepted finite monitor observes **one explicitly selected
-temperature contract, both YES/NO tokens**, using Gamma and Polymarket's official
-public market stream. It stores typed quotes, raw evidence, events and suppression
-reasons in its own SQLite. No account or trading credentials are needed.
+Independent Python monitor of public Polymarket temperature contracts. **One
+project, two independent algorithms, one Telegram bot.** The regional catalogue
+currently runs PRICE only; optional US AWC/LAMP remains in the single-contract
+observer. No trading, probabilities, LOCK strategy or own Tmax model.
 
-## Approved notification direction
+Reconciled with accepted main **`937d3bc` (16 November 2026, PR #22)**. This is a
+source/evidence baseline, not an installed server version. The repository is
+currently **public**; see [ROADMAP](docs/ROADMAP.md) for the read-only protection
+snapshot, accepted work and remaining qualification.
 
-**One project, two independent algorithms, one Telegram bot:**
+## Implemented capabilities
 
-- **📈 PRICE ALERT** — upward price-threshold crossings, not outcome prediction.
-  Implemented PRICE rules: 50/55/60/70/80%, Decimal midpoint of the actual side's
-  bid and ask, once per market/side/threshold, no rearm. Acceptance must remain
-  pinned to the reviewed @holy_nfx_bot source rules.
-- **☀️ LAMP ALERT** — independently triggered by original forecast revisions:
-  verified bucket-boundary crossings or a significant remaining-peak change.
+| Component | Accepted behavior | Qualification boundary |
+| --- | --- | --- |
+| PRICE ALERT | Real YES/NO token Decimal midpoint; upward 50/55/60/70/80%; once-only, REARM=false | Detector, persistence, GAP/restart and rollback tests; finite historical live evidence |
+| Regional catalogue | One codebase; Europe 11 profiles or US 10 profiles, separate regional directories | Database/config compatibility tested; current full-fleet live readiness not claimed |
+| Notification filter | Opt-in bid confirmation, fast priority 70/80, ordinary same-bucket/side grouping | Historical comparison and offline integration tests; current-build live delivery still needs qualification |
+| Shared Telegram queue | Atomic event/enqueue, explicit refusal/outcome, SENT/UNKNOWN restart protection | Accepted implementation and historical ACK evidence; no permanent sender deployment |
+| Local-day rollover | Catalogue rediscovery and new baselines within its finite deadline | Date/DST/restart tests; current-build live midnight acceptance remains open |
+| US weather/LAMP | Optional observations/original hourly context; independent KLGA LAMP ALERT | Accepted finite components; disabled in the regional catalogue |
 
-The opt-in PRICE algorithm is implemented; see [PRICE_ALERT.md](docs/PRICE_ALERT.md). Independent KLGA LAMP notifications are also opt-in; see [LAMP_ALERT.md](docs/LAMP_ALERT.md). Existing 50/70/90 ask research events
-remain unchanged and are **not** the Netflix algorithm. No winner/lock strategy
-is part of the product. See [STRATEGY.md](docs/STRATEGY.md) and
-[ROADMAP.md](docs/ROADMAP.md) for implementation and acceptance gates.
+PRICE rules were checked against the retained original `@holy_nfx_bot` source;
+that is not proof of its currently deployed binary. Legacy 50/70/90 ask research
+still retains events. Its `ENGINE_POINT_BOUND` no longer invalidates an otherwise
+usable PRICE quote. See [research isolation](docs/PRICE_RESEARCH_ISOLATION.md).
 
-The shared durable Telegram queue was accepted in PR #11. PRICE and LAMP have
-separate event/deduplication state and short English cards. Authorized TEST sends
-and two real Amsterdam PRICE deliveries have been confirmed; this does not imply
-permanent deployment. PR #5 remains historical groundwork, not the current queue.
+## Finite PRICE entry points
 
-**PR #12 is accepted and merged; stages 0 and 1 accepted.** PR #14 targets the cleaned main and remains unmerged; PR #13 source research is deferred. See
-[verified acceptance order](docs/PRICE_ACCEPTANCE_ORDER.md). No forecast expansion
-or next stage begins automatically. Existing explicitly authorized finite runs
-are separate from main and from production readiness.
-
-## Run
-
-Python 3.11+ on Linux or macOS. One runtime dependency: `websockets==17.1`.
-Create a local development environment once:
+Python **3.11+** on Linux/macOS. Runtime dependency **`websockets==17.4`** is pinned
+in package metadata and the development lock. Prepare a local environment:
 
 ```sh
 python3 -m venv .venv
 .venv/bin/python -m pip install -c requirements-dev.lock -e '.[test]'
 ```
 
-Then run the finite experiment with **one command**:
+These finite no-send examples use separate owned test directories. Examples do
+not authorize a server installation, new live experiment or Telegram send:
+
+```sh
+.venv/bin/python -m holy_weather.catalogue --region europe --data-dir data/europe-test --seconds 120 --price-notification-filter
+.venv/bin/python -m holy_weather.catalogue --region us --data-dir data/us-test --seconds 120 --price-notification-filter
+```
+
+The catalogue verifies current-local-day contracts, rules, station and real
+YES/NO identities. Missing/ambiguous buckets, changed rules or bad identities
+fail explicitly. Gamma indicative prices never replace native WebSocket bid/ask.
+PRICE and its queue are ON; Telegram is OFF unless `--send` is explicitly used.
+The filter is OFF unless `--price-notification-filter` is supplied. Ordinary
+batching defaults to 10 seconds; `--price-batch-seconds` accepts 10/15/30.
+
+Profiles are pinned in [core.py](src/holy_weather/core.py):
+
+- US: New York, Atlanta, Seattle, Miami, Chicago, Dallas, Austin, Houston,
+  Los Angeles, San Francisco.
+- Europe: London, Paris, Amsterdam, Munich, Milan, Madrid, Warsaw, Helsinki,
+  Moscow, Istanbul, Ankara.
+
+Each region retains its own SQLite, queue and rule identity; the codebase is
+shared, the databases are not merged. One writer owns each directory. The
+256-MiB limit is per directory, not a global budget for both regional processes.
+
+The original single-contract entry point remains available:
 
 ```sh
 .venv/bin/holy-weather observe --config config.example.toml
 ```
 
-The example selects New York's native `46-47°F` contract on the current
-LaGuardia local date. Configure an exact bucket before another experiment.
-Discovery refuses an absent/ambiguous bucket, wrong station/date, changed rules,
-closed market or bad token mapping. It never silently chooses a different bucket.
-Market metadata state and quote freshness are separate.
+That example enables legacy research only: PRICE, queue and Telegram default OFF.
+A matching single-contract config enables PRICE with `price_alert_enabled = true`
+and `alert_queue_enabled = true`; filtering is independently opt-in. Select the
+exact current native bucket before a run. The single-contract observer stops
+at its local-day end; **automatic rediscovery belongs to the catalogue**.
+Both entry points remain finite: default 120 seconds, configured maximum one hour.
+There is no permanent supervisor or automatic daily schedule.
 
-Default duration is 120 seconds; stage-one maximum is one hour. Data directory
-and duration may be overridden by `HOLY_WEATHER_DATA_DIR` and
-`HOLY_WEATHER_DURATION_SECONDS`. Unknown configuration keys and invalid limits
-fail explicitly. No automatic market-date rollover is implemented.
+## Quotes, delivery and storage
 
-The terminal summary includes contract identity, both typed quote snapshots,
-ingest/current freshness, events/suppressions, gaps, bytes, database checks and
-Linux process disk writes. Rotating JSON logs are in the owned data directory.
-No price movement is a normal result. A missing quote or network failure is a
-different state. SIGINT/SIGTERM stop safely; there is no restart daemon.
+Full fresh book/BBO establishes PRICE baseline/crossings. Depth, trades, heartbeat
+or incomplete prices cannot substitute for a midpoint. Source/receipt clocks
+remain separate; the catalogue allows at most 100 ms source lead without rewriting
+time or extending the **90-second** freshness limit. GAP/restart requires a new
+baseline and preserves consumed levels. Unknown gap movement is not reconstructed.
 
-```sh
-.venv/bin/holy-weather stats --config config.example.toml
-.venv/bin/holy-weather prune --config config.example.toml
-.venv/bin/holy-weather prune --config config.example.toml --apply
-```
+With filtering enabled, bid-growing 70/80 work is immediately ready; ask-only
+work waits at most eight seconds. Eligible unconfirmed priority work carries an
+explicit ask-only warning. Ordinary 50/55/60 work groups for ten seconds by
+default. Continuity and expiry refusals remain final. Ready time is not Telegram
+ACK time. See [notification policy](docs/PRICE_NOTIFICATION_POLICY.md).
 
-`stats` and maintenance require the writer to be stopped. Prune defaults to a
-preview and touches only this application's owned SQLite. Referenced evidence
-and latest snapshots are protected. No source data from other projects is opened.
+The queue bounds unresolved work at 1024, retains terminal receipts and records
+per-event admission/refusal. UNKNOWN is not retried. Free queue slots do not
+mean free physical disk. SQLite remains schema v1; changed quotes and referenced
+evidence are retained. Unchanged confirmations coalesce with 15-second checkpoints.
+The **256-MiB** guard includes database/WAL/SHM/logs and stops capture before its
+reserve is exhausted. Long-run storage/archiving is not qualified; see
+[ARCHITECTURE](ARCHITECTURE.md). Explicit maintenance requires the stopped matching
+writer/configuration; generic single-contract maintenance is not a regional reader.
 
-## Legacy research events and shared data
+## Optional US weather and LAMP
 
-* Ask movement at least 10¢ over at most 15 minutes.
-* Up/down transitions of `ask >= 50/70/90¢`, with configurable cooldown and 2¢
-  rearm distance. Distinct suppressed crossings are retained for research.
-* Retrace at least half a significant movement within 15 minutes of its peak.
-* Connection/restart/invalid-input recovery establishes a baseline, never a
-  guessed crossing across a gap. Rule state and duplicate identities persist.
-* Bid, ask, sizes and timed trades stay separate. Snapshot last-trade prices have
-  no invented execution clock. BBO messages have unknown sizes.
-* A quote older than 90 seconds, future clock, missing ask or reversed source
-  time is stored with an explicit status and does not create a price event.
+The single-contract observer accepts the existing
+[AWC config](config.weather.example.toml) and [LAMP config](config.lamp.example.toml).
+Neither example enables Telegram or LAMP ALERT automatically. Context keeps METAR,
+maximum among received observations and original future LAMP peak separate.
+Late receipts cannot revise old events. Independent KLGA LAMP ALERT is opt-in:
+configured 2°F peak change or a verified bucket-boundary crossing, comparing the
+same remaining hours. See [LAMP ALERT](docs/LAMP_ALERT.md).
 
-No complete depth-delta history is archived. A price-change message can confirm
-the actual top of book. Every changed bid/ask is retained; unchanged confirmations
-are coalesced into at most one checkpoint per token per 15 seconds. Coalescing is
-counted and never substitutes a heartbeat for a provider quote. Relevant native messages are compressed
-and hashed; event records point to their source inputs and the Gamma receipt.
-The data budget is 256 MiB including database/WAL/logs. Capture stops before its
-reserve is exhausted; the limit is not silently raised. See
-[ARCHITECTURE.md](ARCHITECTURE.md) for retention and recovery limits.
+Ten US context profiles exist; they are not a continuously qualified weather
+fleet. European forecast experiments/PR #13 remain deferred on
+`codex/europe-weather-experiments-preserved`. The regional PRICE catalogue rejects
+weather/LAMP flags. Forecast expansion is not a prerequisite for PRICE acceptance.
 
-## Tests and replay
+## Checks and qualification
 
 ```sh
-.venv/bin/python -B -m pytest -q
 .venv/bin/python -B tools/check_source.py
-.venv/bin/holy-weather replay --config replay.toml --manifest research-manifest.json
+.venv/bin/python -B -m pytest -q
 ```
 
-CI tests are synthetic/offline on Linux. A replay manifest supplies explicit
-SHA-bound Gamma and stream artifacts plus original receipt clocks. No old app,
-Mac, shared database, server transport, secret or production component is a
-runtime dependency. See [docs/QUALIFICATION.md](docs/QUALIFICATION.md).
+Accepted main's [post-merge CI](https://github.com/Quackw/Holy-Weather/actions/runs/43878233806)
+passed **590 tests** on each of Ubuntu/Python **3.11** and **3.13.5**, including
+wheel/source checks and isolated rollback. An ordinary local run skips two
+dependency-rollback cases unless `HOLY_WEATHER_WEBSOCKETS_ROLLBACK_DIR` points to
+a separately prepared 17.1 import directory. CI prepares it without downgrading
+the application. Exact-source rollback also needs the retained local Git history.
 
-Stage 2 optionally adds observed KLGA weather context as described below.
-Stage 3 optionally adds original hourly LAMP context as described below.
-Own forecast models, production installation and a 48-hour supervisor
-remain outside the implementation. The shared Telegram queue is accepted in PR #11. Price alerts
-establish neither warming accuracy nor trading advantage. No orders are placed.
-
-
-## Stage 2: observed weather context
-
-```sh
-.venv/bin/holy-weather observe --config config.weather.example.toml
-```
-
-This stage originally qualified New York/KLGA; the accepted ten-city extension
-below adds the other US profiles. Gamma still verifies the station and market
-rules before the weather worker starts. The official AWC METAR JSON endpoint
-returns up to 24 hours for KLGA. A request runs at most every five minutes in one
-bounded HTTP thread; only the main loop writes SQLite. A failed/denied/invalid
-weather response disables further weather requests for this finite run, while
-market processing continues. Empty results remain explicitly NO_DATA.
-
-Each event's JSON payload freezes `weather`: latest and previous Celsius
-observations, temperature difference, observed maximum, observation/receipt/main
-loop availability clocks, age, freshness, partial coverage and whether an
-observation or correction became available within the movement interval.
-The causal cutoff is the **local market receipt clock**, not an assertion about
-when other participants knew the weather. No cause of a price move is asserted.
-Weather obtained later cannot revise an already committed event.
-
-`FRESH` weather means observation age at most 90 minutes (explicit research
-context policy, not a provider SLA). The independent market limit remains
-90 seconds. Observed maximum covers only received observations from the market's
-local date; it is never an official daily Tmax. COR replaces the same observation
-in future contexts; repeated originals cannot undo a correction. Changed reports
-without COR are flagged as conflicts and excluded from temperature calculations.
-
-No schema migration: compressed response receipts and duplicate/correction flags
-use existing `inputs`; the bounded current-day projection uses `meta`; weather
-evidence uses `event_inputs` and existing retention protection. The market rule
-hash and event IDs are unchanged. Disabling weather or returning to stage 1
-preserves new records; old code simply produces no weather for subsequent events.
-
-Bounds: 128 KiB per HTTP response, 128 current-day observation times, one pending
-worker/result, five-second socket timeout, 4 MiB compressed weather-input ceiling
-within the unchanged 256-MiB directory budget. The weather ceiling disables only
-weather collection; exhausting the global directory budget stops the writer as
-before. No automatic deletion, service or schedule is introduced.
-
-Replay may include `kind: weather` envelopes in its existing SHA-bound stream.
-Their outer `received_at` is main-loop availability; the nested `receipt` retains
-actual HTTP requested/received times, exact body, SHA and source. Envelopes remain
-chronological and cannot precede Gamma. Weather is never retroactively fetched
-for a historical market event. See [stage 2 qualification](docs/STAGE2_QUALIFICATION.md).
-
-
-## Stage 3: original LAMP and remaining-day temperature context
-
-```sh
-.venv/bin/holy-weather observe --config config.lamp.example.toml
-```
-
-LAMP requires the stage-2 weather context. Only the official KLGA station bulletin
-is requested, at most once per 15 minutes, in a separate bounded worker. LAMP
-failure cannot block AWC or price processing. The NOAA web display is experimental,
-not an operational availability guarantee. No alternate URL/identity is tried
-on a denied response. Source HTML, SHA, nominal issue time from its header,
-HTTP receipt and main-loop availability are retained in the same SQLite.
-
-TMP uses native Fahrenheit and fixed-width three-character columns (including
-negative/three-digit values and 999 missing). UTC columns are validated against
-the issue date, then converted using America/New_York. Context uses only future
-hourly points on the contract's local date. Past hours and the next local day
-cannot set the remaining-day peak. DST folds retain both distinct UTC hours.
-
-The structured preview is in `storage.forecast_card`; committed price events
-freeze `lamp` and `prices` alongside weather. It keeps METAR temperature,
-received-observation maximum and original future LAMP peak separate. The signed
-peak-minus-observed-maximum difference is never clamped to zero or used to replace
-the forecast. An hourly peak is not an official daily Tmax or an interval maximum.
-For a verified 46–47°F bucket with nearest-whole half-up rules, the raw-temperature
-interval is [45.5,47.5)°F. Distances are labelled in Fahrenheit.
-
-Missing TMP, partial remaining TMP, no remaining hours, future clocks, unavailable
-or stale bulletins produce explicit statuses and no usable peak. LAMP older than
-two hours by its nominal issue clock is stale (context policy; price freshness
-stays at 90 seconds). Re-fetching an identical bulletin does not reset its issue
-or original availability time. Later bulletins do not modify committed events.
-The cutoff is local market receipt time, not a claim about other traders' knowledge.
-
-No schema migration, service, database or dependency is added. A 64-KiB HTTP bound,
-25/38 hourly columns, one LAMP worker/result and a subordinate 1-MiB compressed
-LAMP journal ceiling fit within the unchanged 256-MiB directory budget. Explicit
-retention preserves referenced forecast evidence. Source rollback to stage 2 uses
-its weather-only config (omit `lamp_context`); the database is not restored from
-an old snapshot. Replay supports causal `kind: lamp` envelopes with immutable
-receipts. See [stage 3 qualification](docs/STAGE3_QUALIFICATION.md).
-
-## Ten-city extension
-
-The same finite, one-contract monitor accepts `new-york`, `atlanta`, `miami`,
-`chicago`, `dallas`, `austin`, `houston`, `los-angeles`, `san-francisco`, `seattle`.
-Both weather flags may be enabled for each. AWC and original LAMP URLs are derived
-from the station whose identity was verified against that contract's rules and
-resolution source. No nearby-station substitution is allowed. Station/time-zone
-pairs are explicitly pinned in `core.CITIES`; a mismatch fails closed.
-
-This extends supported configurations, not a deployed ten-city service. Each
-finite run still owns one contract/database. Keep different cities in separate
-owned data directories. For ten retained runs allocate at most 25 MiB per city
-(250 MiB total); do not run ten default 256 MiB allocations and describe that as
-a shared 256 MiB budget. No automatic concurrent fleet or date rollover is added.
-Select the exact currently offered bucket for each run; an absent bucket is an
-explicit refusal. Historical snapshots are never rebound to another city/day.
-
-See `docs/TEN_CITY_QUALIFICATION.md` for the station matrix and real qualification.
-
-## Stream recovery
-
-Exact known duplicates are diagnosed without resetting valid quotes. Unknown
-reverse-clock updates invalidate the affected side's baseline, not the fact that
-the socket is open. A full fresh quote restores that side without crossing the
-pre-gap price. If a baseline is absent for five seconds, the existing bounded
-reconnect budget applies; exhaustion exits explicitly. This deadline does not
-change the 90-second quote freshness limit. See
-`docs/STREAM_RECOVERY_20261114.md` for failure tests and the 13 recorded incidents.
-Future stages are planning only in `docs/ROADMAP.md`.
-
-## Shared Telegram queue (accepted PR #11)
-
-Default-off durable PRICE/LAMP queue and short English previews: see
-[SHARED_TELEGRAM_QUEUE.md](docs/SHARED_TELEGRAM_QUEUE.md). Exact test previews
-require separate permission before sending. No production deployment.
-
-## European extension (review branch)
-
-Ten verified European cities plus Ankara use Celsius PRICE + AWC context;
-exact stations and time zones are listed in docs/EUROPE_READINESS.md.
-MOSMIX experiments are preserved on `codex/europe-weather-experiments-preserved`
-and are excluded from this PRICE foundation. European forecast alerts remain deferred. NOAA LAMP is
-explicitly rejected for these cities. See [EUROPE_READINESS.md](docs/EUROPE_READINESS.md).
-No European production deployment. Separately authorized finite PRICE experiments
-have sent real cards; these are not forecast qualification or permanent readiness.
-
-## Finite European PRICE catalogue (PR14 candidate)
-
-The candidate `holy_weather.catalogue` reuses the PRICE detector and one durable
-queue for verified European contracts. It adds bounded grouped subscriptions,
-per-side baselines, 100 ms maximum source-clock allowance and finite gap recovery.
-See [review](docs/PRICE_GROUP_RECOVERY_REVIEW.md) and
-[clock evidence](docs/PRICE_CLOCK_ORDER_REVIEW.md). No permanent service, weather
-experiments, next-day rollover or production deployment are included.
+Tests are offline/synthetic. Real captures, receipts, databases, backups and
+secrets stay out of Git. SHA-bound replay preserves original availability clocks.
+Older PR qualification notes and A–D planning tables describe their original
+revisions; the current inventory is [ROADMAP](docs/ROADMAP.md). Green CI does not
+prove deployment, current quotes, Telegram delivery, 24/7 operation or trading edge.
