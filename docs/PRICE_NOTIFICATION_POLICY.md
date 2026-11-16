@@ -64,6 +64,40 @@ cannot be bypassed by the 250ms maintenance cadence.
 No schema, weather, LAMP algorithm, dependency, service or budget change. One
 writer; source events and their evidence remain protected by existing retention.
 
+## Delivered levels and same-side cards
+
+With the filter ON, a later lower/equal threshold does not produce a new card
+after a higher level was delivered for that exact contract, date, token and side.
+For example, delivered YES 55%, a dip, then first crossing of YES 50% remains a
+PRICE event but gets `NOT_QUEUED / DELIVERED_HIGHER_LEVEL`. The event records the
+covering SENT queue key, event references, level and message ID. A lower card
+already waiting when the higher ACK arrives is rejected at claim with the same
+explicit reason. This does not rearm or remove any detector threshold.
+
+Only a SENT receipt whose saved hash matches its non-test preview counts. UNKNOWN
+and TEST do not establish a delivered level. Older receipts are read in place;
+their exact non-test preview distinguishes them from historical TEST sends too.
+No schema migration, history rewrite or separate high-water table is needed.
+
+Eligible same-side events retain the fixed ordinary grouping window (10 seconds
+by default), their IDs, individual admission evidence and oldest expiry. The card
+lists only levels above the previously delivered maximum. Mixed events such as
+new 50/60/70 after delivered 55 keep all original thresholds in SQLite and show
+60/70 in the card. A changed queued preview must be regenerated before claim.
+There is no editing or merging of messages already sent to Telegram.
+
+70/80 keep their separate fast lane and original freshness: ordinary pending
+work cannot delay them or shorten their expiry. Existing ask-only confirmation,
+fallback and GAP refusals are unchanged. If 80 was already delivered, a later
+70 is explicitly covered by that higher SENT receipt, rather than silently lost.
+Replay reports distinguish actual simulated sends, covered events and refusals;
+they never count UNKNOWN as delivery. Filter OFF retains the previous policy.
+
+Compatible rollback reads the added queue fields without changing data. The old
+code can send lower levels again for future events, but admission refusals already
+recorded by this version remain final: no old-event backfill. Keep current SQLite,
+fired thresholds, raw evidence and SENT/UNKNOWN; never restore an old database.
+
 ## Compatibility and rollback
 
 The accepted rule hash and SQLite schema v1 are unchanged. Disabling the filter
