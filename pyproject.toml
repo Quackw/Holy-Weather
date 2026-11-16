@@ -7,7 +7,7 @@ name = "holy-weather"
 version = "0.1.0"
 description = "Finite, independent public temperature-market observer"
 requires-python = ">=3.11"
-dependencies = ["websockets==17.1"]
+dependencies = ["websockets==17.4"]
 
 [project.optional-dependencies]
 test = ["pytest==9.2.0"]
