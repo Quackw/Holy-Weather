@@ -1,5 +1,5 @@
 """Offline subprocess probe, executed with an explicitly selected source tree."""
-import json,sys,sqlite3
+import json,sys,sqlite3,os
 from pathlib import Path
 from datetime import datetime,timezone
 from holy_weather.catalogue import CatalogueConfig,CatalogueStore,Router
@@ -28,6 +28,14 @@ with CatalogueStore(cfg,session=False) as s:
   base=10 if phase=='new' else 20
   feed(s,m,'0.49',base+1);feed(s,m,'0.56',base+2)
   assert s.c.execute("select count(*) from events where type='PRICE_ALERT'").fetchone()[0]==(1 if phase=='new' else 2),'DUPLICATED_FIRED_THRESHOLD'
+  if phase=='new' and os.environ.get('HOLY_WEATHER_RESEARCH_BOUND_PROBE')=='1':
+   # Explicit synthetic boundary injection; normal probe behavior is unchanged.
+   token=m['tokens']['YES']
+   state=json.loads(s.c.execute('select payload from state where token=?',(token,)).fetchone()[0])
+   last=state['points'][-1]
+   state['points']=[dict(last,ask='0.55' if i%2 else '0.56') for i in range(4096)]
+   with s.transaction():
+    s.c.execute('update state set payload=? where token=?',(json.dumps(state),token))
   feed(s,m,'0.71' if phase=='new' else '0.81',base+3)
   if phase=='new':
    rows=s.c.execute("select key,value from meta where key like 'alert_delivery_v1:%' order by key").fetchall()
