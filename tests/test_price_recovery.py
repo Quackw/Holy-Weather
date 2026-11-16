@@ -105,6 +105,25 @@ def test_hung_child_graceful_only_no_second_writer(gamma,tmp_path):
     assert sim.calls[0].terminated==1 and value['active']
 
 
+def test_stopping_hung_child_does_not_busy_wait_on_set_stop(gamma,tmp_path,monkeypatch):
+    plan,m=seed(gamma,tmp_path);ticks=[0.];calls=[]
+    class Stop(threading.Event):
+        def wait(self,delay):
+            assert not self.is_set(),'busy wait on already-set stop'
+            ticks[0]+=delay;return False
+    stop=Stop()
+    class Child:
+        pid=12345;stdin=io.StringIO();terminated=0
+        def poll(self):return None
+        def terminate(self):self.terminated+=1
+    def spawn(*args):
+        child=Child();calls.append(child);stop.set();return child
+    monkeypatch.setattr(r.time,'sleep',lambda delay:ticks.__setitem__(0,ticks[0]+delay))
+    monkeypatch.setattr(r,'preflight',lambda plan:None)
+    value=r.supervise(plan,tmp_path/'control',stop=stop,clock=lambda:AT+int(ticks[0]*1000),monotonic=lambda:ticks[0],_spawn=spawn)
+    assert value['status']=='UNRESPONSIVE_NO_KILL' and len(calls)==1 and calls[0].terminated==1
+
+
 def test_quiet_market_progress_is_not_a_stall(gamma,tmp_path):
     plan,m=seed(gamma,tmp_path);plan=replace(plan,deadline_ms=AT+70000)
     sim=Sim(['SIGNAL_STOP'],hang=True,quiet=True)

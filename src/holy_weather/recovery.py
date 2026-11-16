@@ -240,6 +240,7 @@ def spawn(root,nonce,token):
 def supervise(plan,control_dir,*,token=None,stop=None,clock=None,monotonic=time.monotonic,wait=None,_spawn=spawn):
     """Finite controller; graceful stop only. No kill, boot install or old PID adoption."""
     if plan.config.telegram_enabled and (not isinstance(token,str) or not re.fullmatch(r'\d+:[A-Za-z0-9_-]{20,}',token)):raise RecoveryStop('RECOVERY_EXPLICIT_TOKEN')
+    default_wait=wait is None
     stop=stop or threading.Event();clock=clock or (lambda:time.time_ns()//1000000);wait=wait or stop.wait
     with owned_control(control_dir,plan.config.data_dir) as root:
         if plan.archive_dir:
@@ -297,7 +298,10 @@ def supervise(plan,control_dir,*,token=None,stop=None,clock=None,monotonic=time.
                         child.terminate()  # One SIGTERM to our own child. Never SIGKILL.
                     if requested and monotonic()-requested_at>=30:
                         save('UNRESPONSIVE_NO_KILL');return state
-                    wait(.25)
+                    # Event.wait returns immediately once stopping. Keep the
+                    # bounded grace period paced even for an unresponsive child.
+                    if requested and default_wait and stop.is_set():time.sleep(.25)
+                    else:wait(.25)
                 returncode=child.poll();result_path=root/(nonce+'.result.json');result=json.loads(result_path.read_text()) if result_path.exists() else None
                 # A short-lived process may have published a newer stage and
                 # exited between polls. Never classify it from an older stage.
