@@ -24,3 +24,22 @@ eight-second maximum, grouping policy, database schema and storage limits are
 unchanged. This is an offline regression, not evidence of a real price move or
 Telegram delivery. Reverting the single receive-loop branch restores the old
 timer behavior without changing stored records or the SQLite schema.
+
+## Single-market observer
+
+`app.observe()` had the same missing no-sender path. Its receive loop now calls
+the same `advance_waits()` when Telegram is disabled. Telegram-enabled runs
+continue to advance the queue through `Sender.tick()`. This adds no HTTP call,
+credential access, new timer or writer.
+
+Eight deterministic offline cases drive the actual observer, PRICE detector and
+SQLite queue through complete YES/NO baselines, one ask-only crossing and then
+PONG-only traffic or receive timeouts. Both ordinary rejection and priority
+fallback are checked within one receive-loop turn of the unchanged eight-second
+deadline. Four disabled-sender cases fail on the prior code; all enabled-sender
+controls pass. The ON controls exercise the real sender tick with future pacing
+and a forbidden transport; no Telegram request is made.
+
+Rollback returns `app.py` to the previous version and keeps the current SQLite,
+event history, fired thresholds and delivery records. It restores the previous
+disabled-sender deadline defect; no old database should overwrite new records.

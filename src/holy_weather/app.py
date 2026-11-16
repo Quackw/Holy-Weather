@@ -128,6 +128,7 @@ def observe(cfg, *, connect=None, stop=None, weather_fetch=None, lamp_fetch=None
             baseline_wait_seconds=None):
     if baseline_wait_seconds is not None and (type(baseline_wait_seconds)is not int or not 1<=baseline_wait_seconds<=cfg.duration_seconds):
         raise ValueError('BASELINE_WAIT_MUST_FIT_OBSERVATION_WINDOW')
+    from .alert_queue import advance_waits
     baseline_wait=BASELINE_RECOVERY_SECONDS if baseline_wait_seconds is None else baseline_wait_seconds
     if connect is None:
         from websockets.sync.client import connect
@@ -167,6 +168,7 @@ def observe(cfg, *, connect=None, stop=None, weather_fetch=None, lamp_fetch=None
                             if datetime.now(timezone.utc).astimezone(ZoneInfo(market['timezone'])).date().isoformat()!=market['date']:
                                 reason='MARKET_LOCAL_DATE_ENDED';stop.set();break
                             if sender:sender.tick(store,millis())
+                            else:advance_waits(store,millis())
                             if weather:weather.tick(store,market,millis())
                             if lamp:lamp.tick(store,market,millis())
                             if store.recovery_due(baseline_wait):
