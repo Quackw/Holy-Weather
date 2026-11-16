@@ -211,6 +211,11 @@ class Store:
         return (self.seen_tops.get(sample.get('token'),{}).get('identity')==sample['id'] or
                 bool(self.c.execute('select 1 from inputs i join samples s on s.input_id=i.id where i.identity=?',(sample['id'],)).fetchone()))
 
+    def quote_status(self, research_status):
+        # evolve reached this research-only bound after validating the quote's
+        # clocks/order/ask. Keep its failure in samples; PRICE validates bid too.
+        return 'FRESH' if self.cfg.price_alert_enabled and research_status=='ENGINE_POINT_BOUND' else research_status
+
     def apply(self, sample):
         raw = canonical(sample['raw']).encode()
         if len(raw) > 262144:
@@ -242,6 +247,9 @@ class Store:
             if awaiting and previous:
                 previous=reset(previous)
             state, events, status = evolve(previous, sample, self.cfg)
+            if status=='ENGINE_POINT_BOUND' and self.cfg.price_alert_enabled:
+                # The accepted source clock must survive the research reset/GAP.
+                state['high_source']=sample['source_ms']
             if awaiting and sample['kind']=='price_change' and status=='FRESH':
                 state, events, status = reset(previous if previous is not None else state), [], 'AWAITING_BASELINE'
             self.c.execute('insert or replace into state values(?,?)', (sample['token'], canonical(state)))
@@ -269,12 +277,14 @@ class Store:
                         self.c.execute('insert or ignore into event_inputs values(?,?)',(ident,price['input_id']))
                 discovery=self.discovery_reference(sample['token'])
                 if discovery:self.c.execute('insert or ignore into event_inputs values(?,?)',(ident,discovery[0]))
+            research_status=status
+            status=self.quote_status(research_status)
             if self.cfg.price_alert_enabled:
                 from .price_alert import record
                 events += record(self,sample,status)
                 from .alert_queue import settle_waits
                 settle_waits(self,sample['received_ms'],sample=sample,status=status)
-            result={'status': status, 'events': events,'raw_bytes':len(raw),'compressed_bytes':len(compressed)}
+            result={'status': status, 'research_status':research_status, 'events': events,'raw_bytes':len(raw),'compressed_bytes':len(compressed)}
         # Readiness changes only after the input/state transaction commits.
         if quote:
             if status=='FRESH' and sample['kind'] in ('book','best_bid_ask'):
@@ -427,7 +437,7 @@ class Store:
             if self.cfg.source_clock_tolerance_ms:
                 row['source_lead_ms']=row['source_ms']-row['received_ms']
                 row['source_clock_tolerance_ms']=self.cfg.source_clock_tolerance_ms
-            row['quote_usable_now']=(row['kind']!='last_trade_price' and row['status']=='FRESH'
+            row['quote_usable_now']=(row['kind']!='last_trade_price' and self.quote_status(row['status'])=='FRESH'
                                      and row['ask'] is not None and row['bid'] is not None and row['freshness_now']=='FRESH')
         market=self.c.execute('select payload from market where id=1').fetchone()
         tokens=json.loads(market[0])['tokens'] if market else {}
