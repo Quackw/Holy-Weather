@@ -33,6 +33,14 @@ new database and fired/delivery records. Do not restore an older database over
 new records. Synthetic restart/no-repeat tests cover all ten US cities; existing
 EU, GAP, queue, capacity and rollover tests remain in the full suite.
 
-Linux CI for this new candidate and an isolated old-code rollback with new
-writes remain required before rollout. Existing dependency/security and
+Linux qualification passed 557 tests on Python 3.13.5 in an isolated directory.
+The two subprocess rollback probes used the exact prior EU/US runtime sources
+from verified backups: old code writes an event, new code adds another event and
+synthetic SENT/UNKNOWN receipts, then old code preserves all event/input/meta rows,
+does not repeat consumed thresholds, and records a new 80% crossing. No network
+transport or real delivery is used. CI runs the same probes as restart coverage;
+the historical source override is private Linux qualification evidence.
+Test assembly initially omitted tools/fixtures and the subprocess dependency path;
+these packaging errors were corrected before the successful complete run.
+GitHub CI must pass on the published head before acceptance. Existing dependency/security and
 long-term retention findings are separate work, not silently changed here.
