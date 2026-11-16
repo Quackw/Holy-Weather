@@ -4,13 +4,13 @@ No weather, forecasts, services, or implicit Telegram activation. A distinct
 rule hash prevents the single-market CLI from opening a catalogue as one market.
 """
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import datetime, timezone
 import json
 import time
 import zlib
 from zoneinfo import ZoneInfo
-from .core import Config, EUROPE_CITIES, canonical, sha
+from .core import Config, EUROPE_CITIES, US_CITIES, CITIES, canonical, sha
 from .storage import Store, StorageStop
 from .app import process
 
@@ -38,14 +38,19 @@ def native_timing(ws):
             'native_rtt_ms':round(latency*1000,3) if isinstance(latency,(int,float)) and latency>0 else None}
 
 
-def local_days(at):
+def local_days(at, cities=None):
     now=datetime.fromtimestamp(at/1000,timezone.utc)
-    return {city:now.astimezone(ZoneInfo(v[2])).date().isoformat() for city,v in EUROPE_CITIES.items()}
+    return {city:now.astimezone(ZoneInfo(v[2])).date().isoformat() for city,v in (EUROPE_CITIES if cities is None else cities).items()}
 
 
 @dataclass(frozen=True)
 class CatalogueConfig(Config):
     city: str = 'london'
+    region: str = 'europe'
+
+    @property
+    def cities(self):
+        return US_CITIES if self.region == 'us' else EUROPE_CITIES
     bucket: str = 'catalogue'
     source_clock_tolerance_ms: int = 100
     price_alert_enabled: bool = True
@@ -53,12 +58,13 @@ class CatalogueConfig(Config):
 
     def __post_init__(self):
         super().__post_init__()
+        if self.region not in ('us','europe'):raise ValueError('CATALOGUE_REGION')
         if (self.weather_context or self.lamp_context or self.lamp_alert_enabled
                 or not self.price_alert_enabled or not self.alert_queue_enabled):
             raise ValueError('CATALOGUE_PRICE_ONLY')
 
     def rule_hash(self):
-        return sha(['EUROPE_PRICE_CATALOGUE_V1', super().rule_hash()])
+        return sha(['EUROPE_PRICE_CATALOGUE_V1' if self.region=='europe' else 'US_PRICE_CATALOGUE_V1', Config(**{f.name:getattr(self,f.name) for f in fields(Config)}).rule_hash()])
 
 
 class CatalogueStore(Store):
@@ -90,8 +96,8 @@ class CatalogueStore(Store):
 
     def bind(self, market, receipt):
         condition=market['condition_id'].lower()
-        if market['station'] not in {v[1] for v in EUROPE_CITIES.values()}:
-            raise StorageStop('CATALOGUE_EUROPE_ONLY')
+        if market['station'] not in {v[1] for v in self.cfg.cities.values()}:
+            raise StorageStop('CATALOGUE_REGION_MISMATCH')
         saved=self.c.execute('select value from meta where key=?',(PREFIX+condition,)).fetchone()
         prior=json.loads(saved[0]) if saved else None
         if prior and prior!=market:raise StorageStop('MARKET_IDENTITY_OR_RULE_DRIFT')
@@ -242,7 +248,7 @@ def discover_city(city, *, clock=None, fetch=None):
     at=clock();cfg=Config(city=city)
     day=datetime.fromisoformat(cfg.day(at))
     months=('january','february','march','april','may','june','july','august','september','october','november','december')
-    slug=f'highest-temperature-in-{EUROPE_CITIES[city][0]}-on-{months[day.month-1]}-{day.day}-{day.year}'
+    slug=f'highest-temperature-in-{CITIES[city][0]}-on-{months[day.month-1]}-{day.day}-{day.year}'
     url=GAMMA+'?'+urlencode({'slug':slug})
     with fetch(Request(url,headers={'User-Agent':'Holy-Weather/0.1 public-observation'}),timeout=12) as response:
         body=response.read(4_000_001);status=response.status
@@ -275,18 +281,18 @@ class DayDiscovery:
 
     def due(self):
         at=self.clock()
-        return local_days(at)!=self.days or any(at>=v for v in self.retry.values())
+        return local_days(at,self.store.cfg.cities)!=self.days or any(at>=v for v in self.retry.values())
 
     def refresh(self, stopped=lambda:False):
         s=self.store
-        for city,day in local_days(self.clock()).items():
+        for city,day in local_days(self.clock(),s.cfg.cities).items():
             if stopped():break
             at=self.clock()
             # Date may change while earlier cities are being fetched.
-            day=local_days(at)[city]
+            day=local_days(at,s.cfg.cities)[city]
             if self.days.get(city)==day and at<self.retry.get(city,float('inf')):continue
             self.days[city]=day;self.retry.pop(city,None)
-            station=EUROPE_CITIES[city][1]
+            station=s.cfg.cities[city][1]
             self.selected={c for c in self.selected if s.markets[c]['station']!=station}
             s.expire_closed_deliveries(at);s.retire(at)
             self.selected.intersection_update(s.markets)
@@ -313,9 +319,9 @@ class DayDiscovery:
                 if len(markets)>16:raise ValueError('CITY_MARKET_BOUND')
                 received=int(datetime.fromisoformat(receipt['received_at']).timestamp()*1000) if markets else at
                 for market in markets:
-                    if (market['station']!=station or market['timezone']!=EUROPE_CITIES[city][2]
-                            or market['date']!=day or local_days(self.clock())[city]!=day
-                            or local_days(received)[city]!=day or received>self.clock()):
+                    if (market['station']!=station or market['timezone']!=s.cfg.cities[city][2]
+                            or market['date']!=day or local_days(self.clock(),s.cfg.cities)[city]!=day
+                            or local_days(received,s.cfg.cities)[city]!=day or received>self.clock()):
                         raise ValueError('DISCOVERY_CITY_DATE_OR_RECEIPT_MISMATCH')
                 for market in markets:s.bind(market,receipt)
                 self.selected.update(m['condition_id'].lower() for m in markets)
@@ -495,6 +501,7 @@ def main():
     from .telegram import token_from_env
     parser=argparse.ArgumentParser()
     parser.add_argument('--data-dir',required=True)
+    parser.add_argument('--region',choices=('europe','us'),default='europe')
     parser.add_argument('--seconds',type=int,default=120)
     parser.add_argument('--send',action='store_true')
     parser.add_argument('--price-notification-filter',action='store_true',
@@ -502,7 +509,8 @@ def main():
     parser.add_argument('--price-batch-seconds',type=int,choices=(10,15,30),default=10)
     args=parser.parse_args();stop=threading.Event()
     for sig in (signal.SIGINT,signal.SIGTERM):signal.signal(sig,lambda *_:stop.set())
-    cfg=CatalogueConfig(data_dir=args.data_dir,duration_seconds=args.seconds,telegram_enabled=args.send,
+    cfg=CatalogueConfig(region=args.region,city='new-york' if args.region=='us' else 'london',
+                        data_dir=args.data_dir,duration_seconds=args.seconds,telegram_enabled=args.send,
                         price_notification_filter=args.price_notification_filter,price_batch_seconds=args.price_batch_seconds)
     result=observe_catalogue(cfg,token=token_from_env() if args.send else None,stop=stop)
     print(json.dumps(result,ensure_ascii=False,sort_keys=True))
