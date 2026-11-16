@@ -36,10 +36,16 @@ The new cases cover:
 
 The finite 4097-piece regression fails on 17.1 because the fragmented message is
 accepted, and passes on 17.4 with `1009: too many fragments`. The traced Python
-allocation peak in the targeted local test was 865589 bytes; the regression
+allocation peak in the targeted local test was 860536 bytes; the regression
 requires it to remain below 8 MiB. This measures that finite test's allocations,
 not total process RSS or a daily operating budget. Payload, queue (16), quote
 freshness (90 seconds) and data-directory (256 MiB) limits are unchanged.
+
+Test peers send concurrently with receive calls. Their kernel socket buffers are
+set to 1 KiB to force backpressure, avoiding dependence on macOS/Linux buffer
+sizes. Sender/receiver workers have finite cleanup. CI jobs have a ten-minute
+deadline and dump thread stacks after a test stalls for 30 seconds. These settings
+apply to the test harness; application connection timeouts are unchanged.
 
 Linux CI runs the entire suite and a regular wheel build on Python 3.11 and
 exactly 3.13.5. It installs 17.1 into a separate temporary import directory solely

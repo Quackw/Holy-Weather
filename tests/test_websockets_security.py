@@ -10,7 +10,7 @@ import threading
 import tracemalloc
 import pytest
 import websockets
-from websockets.exceptions import ConnectionClosedError
+from websockets.exceptions import ConnectionClosed, ConnectionClosedError
 from websockets.protocol import CLIENT, SERVER, OPEN, Protocol
 from websockets.sync.connection import Connection
 from holy_weather.catalogue import CatalogueStore, Router
@@ -25,6 +25,10 @@ from conftest import NOW
 @contextmanager
 def pair():
     left, right = socket.socketpair()
+    # Reproduce backpressure even on platforms with generous socket buffers.
+    for endpoint in (left, right):
+        endpoint.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024)
+        endpoint.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024)
     client = Connection(left, Protocol(CLIENT, state=OPEN, max_size=262144),
                         ping_interval=None, close_timeout=.1, max_queue=16)
     peer = Connection(right, Protocol(SERVER, state=OPEN, max_size=262144),
@@ -32,34 +36,59 @@ def pair():
     try:
         yield client, peer
     finally:
+        for connection in (client, peer):
+            try: connection.socket.shutdown(socket.SHUT_RDWR)
+            except OSError: pass
         client.close_socket(); peer.close_socket()
         client.recv_events_thread.join(1); peer.recv_events_thread.join(1)
         assert not client.recv_events_thread.is_alive()
         assert not peer.recv_events_thread.is_alive()
 
 
+@contextmanager
+def sending(client, peer, payload):
+    # A synchronous producer can fill max_queue before recv starts on Linux.
+    errors = []
+    def send():
+        try: peer.send(payload)
+        except Exception as exc: errors.append(exc)
+    worker = threading.Thread(target=send, daemon=True); worker.start()
+    try:
+        yield
+    finally:
+        worker.join(.1)
+        if worker.is_alive():
+            for connection in (client, peer):
+                try: connection.socket.shutdown(socket.SHUT_RDWR)
+                except OSError: pass
+            worker.join(2)
+        assert not worker.is_alive()
+        assert all(isinstance(exc, ConnectionClosed) for exc in errors), errors
+
+
 @pytest.mark.parametrize('fragmented', [False, True])
 def test_sync_message_at_existing_payload_limit(fragmented):
     body = 'x' * 262144
     with pair() as (client, peer):
-        peer.send([body[n:n + 65536] for n in range(0, len(body), 65536)] if fragmented else body)
-        assert client.recv(timeout=2) == body
+        payload = [body[n:n + 65536] for n in range(0, len(body), 65536)] if fragmented else body
+        with sending(client, peer, payload):
+            assert client.recv(timeout=2) == body
 
 
 def test_sync_oversize_message_closes_with_1009():
     with pair() as (client, peer):
-        peer.send('x' * 262145)
-        with pytest.raises(ConnectionClosedError) as error:
-            client.recv(timeout=2)
-        assert error.value.sent.code == 1009
+        with sending(client, peer, 'x' * 262145):
+            with pytest.raises(ConnectionClosedError) as error:
+                client.recv(timeout=2)
+            assert error.value.sent.code == 1009
 
 
 @pytest.mark.parametrize('pieces', [1, 4095])
 def test_fragment_limit_accepts_valid_complete_message(pieces):
     # send(iterable) appends a final empty frame: 4095 pieces = 4096 frames.
     with pair() as (client, peer):
-        peer.send([''] * pieces)
-        assert client.recv(timeout=2) == ''
+        with sending(client, peer, [''] * pieces):
+            assert client.recv(timeout=2) == ''
 
 
 def test_excess_empty_fragments_are_rejected_with_bounded_memory(record_property):
@@ -67,11 +96,11 @@ def test_excess_empty_fragments_are_rejected_with_bounded_memory(record_property
     with pair() as (client, peer):
         tracemalloc.start()
         try:
-            peer.send([''] * 4097)
-            with pytest.raises(ConnectionClosedError) as error:
-                client.recv(timeout=2)
-            assert error.value.sent.code == 1009
-            assert error.value.sent.reason == 'too many fragments'
+            with sending(client, peer, [''] * 4097):
+                with pytest.raises(ConnectionClosedError) as error:
+                    client.recv(timeout=2)
+                assert error.value.sent.code == 1009
+                assert error.value.sent.reason == 'too many fragments'
             _, peak = tracemalloc.get_traced_memory()
             record_property('fragment_test_python_peak_bytes', peak)
             assert peak < 8 * 1024 * 1024
