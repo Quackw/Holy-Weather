@@ -39,6 +39,35 @@ SENT and UNKNOWN are never re-claimed. An uncertain previous HTTP attempt keeps
 the sender disabled across child/controller recovery while price collection
 continues. This does not claim that a small bid increase proves demand or edge.
 
+### PR #28 review corrections
+
+Planned phase shutdown first forbids new sends, then waits at most six seconds
+for the already claimed HTTP request (the request timeout stays five seconds).
+The SQLite writer records any result received during that wait before Store
+closes. Repeated close calls do not wait again or reopen result processing.
+If the bounded wait expires, the claim remains UNKNOWN, including after a late
+ACK; it is never reset to PENDING or inferred to be SENT. The six-second drain
+fits the controller's 30-second termination grace and 60-second STOPPING limit.
+
+Observer results, worker progress/results, controller state and CLI output expose
+`telegram_enabled` and a safe `telegram_disabled_reason`. A previous uncertain
+send is reported as `PREVIOUS_SEND_UNCONFIRMED`; a shutdown timeout is
+`SEND_RESULT_UNKNOWN_AT_CLOSE`. Collection can remain RUNNING while Telegram is
+explicitly disabled. These fields never contain a token or private HTTP payload.
+
+Cancellation/deadline is checked again after preflight and immediately before
+spawn. A cancelled launch intent is finalized without an active PID or a charged
+restart. A process result is trusted as a normal completion only with exit code
+zero: a nonzero exit is classified using the existing crash signal/stage policy
+and recovery budget, even when a result file already exists. In particular, a
+STOPPING-stage crash cannot become a free ordinary phase or a clean stall stop.
+
+`tests/test_pr28_review.py` reproduces the three original defects before the
+correction, using real Store/claim/Sender and delayed synthetic responses through
+the normal observer/worker close path. It also covers cancellation inside
+preflight/after intent, progress reporting while collection continues, existing
+UNKNOWN protection and result/return-code disagreement. No live send is used.
+
 ## Data, identities and bounds
 
 The parent checks the ownership marker, available writer lock, matching rule

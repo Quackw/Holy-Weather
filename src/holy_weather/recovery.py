@@ -159,12 +159,14 @@ def prepare_resume(store,identity,at):
 
 
 class Progress:
-    def __init__(self,root,nonce):self.root=root;self.nonce=nonce;self.last=-float('inf');self.stage=None
+    def __init__(self,root,nonce):self.root=root;self.nonce=nonce;self.last=-float('inf');self.stage=None;self.delivery={}
+    def sender_status(self,value):
+        self.delivery=dict(value);self.last=-float('inf');self(self.stage or 'STARTING')
     def __call__(self,stage):
         if stage not in STAGE_TIMEOUT:raise RecoveryStop('RECOVERY_PROGRESS_STAGE')
         mono=time.monotonic()
         if mono-self.last<1 and stage==self.stage:return
-        try:write(self.root,self.nonce+'.progress.json',dict(nonce=self.nonce,pid=os.getpid(),stage=stage,monotonic=mono,at_ms=time.time_ns()//1000000))
+        try:write(self.root,self.nonce+'.progress.json',dict(nonce=self.nonce,pid=os.getpid(),stage=stage,monotonic=mono,at_ms=time.time_ns()//1000000,**self.delivery))
         except OSError:raise RecoveryStop('RECOVERY_PROGRESS_WRITE') from None
         self.last=mono;self.stage=stage
 
@@ -206,6 +208,7 @@ def worker(root,nonce,token):
     timer=threading.Timer(max(0,(plan.deadline_ms-time.time_ns()//1000000)/1000),stop.set)
     timer.daemon=True;timer.start()
     progress=Progress(root,nonce);progress('STARTING');outcome='FATAL'
+    delivery=dict(telegram_enabled=plan.config.telegram_enabled,telegram_disabled_reason=None if plan.config.telegram_enabled else 'NOT_ENABLED_IN_PLAN')
     try:
         remaining=(plan.deadline_ms-time.time_ns()//1000000)//1000
         if remaining<1:outcome='DEADLINE'
@@ -218,8 +221,14 @@ def worker(root,nonce,token):
                 with CatalogueStore(cfg,session=False) as store:
                     disabled=prepare_resume(store,saved['identity'],time.time_ns()//1000000)
                 cfg=replace(cfg,telegram_enabled=cfg.telegram_enabled and not disabled)
+                def sender_status(value):
+                    delivery.update(value)
+                    if disabled:delivery.update(telegram_enabled=False,telegram_disabled_reason='PREVIOUS_SEND_UNCONFIRMED')
+                    progress.sender_status(delivery)
+                sender_status(dict(telegram_enabled=cfg.telegram_enabled,telegram_disabled_reason='PREVIOUS_SEND_UNCONFIRMED' if disabled else delivery['telegram_disabled_reason']))
                 result=observe_catalogue(cfg,token=token if cfg.telegram_enabled else None,stop=stop,
-                    discover=lambda city:frozen_discover(plan,city),progress=progress,session_day=plan.session_day)
+                    discover=lambda city:frozen_discover(plan,city),progress=progress,session_day=plan.session_day,
+                    on_sender_status=sender_status)
                 outcome=result['state']
     except Exception as exc:
         # Exception text can contain private HTTP details. Keep only the class.
@@ -227,7 +236,7 @@ def worker(root,nonce,token):
         reason=str(exc) if re.fullmatch(r'[A-Z][A-Z0-9_:.+-]{0,96}',str(exc)) else None
     else:error=None;reason=None
     timer.cancel()
-    write(root,nonce+'.result.json',dict(nonce=nonce,pid=os.getpid(),state=outcome,error=error,reason=reason,at_ms=time.time_ns()//1000000))
+    write(root,nonce+'.result.json',dict(nonce=nonce,pid=os.getpid(),state=outcome,error=error,reason=reason,at_ms=time.time_ns()//1000000,**delivery))
 
 
 def spawn(root,nonce,token):
@@ -264,6 +273,12 @@ def supervise(plan,control_dir,*,token=None,stop=None,clock=None,monotonic=time.
         def save(status):
             state.update(status=status,last_ms=clock());write(root,'state.json',state)
         def ended():return stop.is_set() or clock()>=plan.deadline_ms or monotonic()>=mono_deadline
+        def sender_status(value):
+            if 'telegram_enabled' not in value:return
+            enabled=value['telegram_enabled'];reason=value.get('telegram_disabled_reason')
+            if type(enabled) is not bool or reason not in (None,'NOT_ENABLED_IN_PLAN','NOT_ENABLED_IN_CONFIG','PREVIOUS_SEND_UNCONFIRMED','SEND_RESULT_UNKNOWN','SEND_RESULT_NOT_SENT','SEND_RESULT_UNKNOWN_AT_CLOSE'):raise RecoveryStop('RECOVERY_SENDER_STATUS')
+            if state.get('telegram_enabled')!=enabled or state.get('telegram_disabled_reason')!=reason:
+                state.update(telegram_enabled=enabled,telegram_disabled_reason=reason);save(state['status'])
         try:
             while not ended():
                 now=clock()
@@ -280,10 +295,15 @@ def supervise(plan,control_dir,*,token=None,stop=None,clock=None,monotonic=time.
                     if ended():break
                 if code_identity()!=code:raise RecoveryStop('RECOVERY_CODE_DRIFT')
                 binding=preflight(plan)
+                if ended():state['retry']=False;break
                 if binding is not None and binding!=identity:raise RecoveryStop('RECOVERY_CONTROL_BINDING')
                 nonce=uuid.uuid4().hex;entry=dict(nonce=nonce,at_ms=clock(),recovery=retry)
                 if retry:state['restarts'].append(clock())
                 state['attempts'].append(entry);state['active']=nonce;state.pop('next_ms',None);save('STARTING')
+                if ended():
+                    entry.update(state='CANCELLED_BEFORE_SPAWN',finished_ms=clock());state.update(active=None,retry=False)
+                    if retry:state['restarts'].pop()
+                    break
                 child=_spawn(root,nonce,token);entry['pid']=child.pid;save('RUNNING')
                 child.stdin.write((token or '')+'\n');child.stdin.flush();child.stdin.close()
                 started=monotonic();requested=None;requested_at=None;progress=None
@@ -291,6 +311,7 @@ def supervise(plan,control_dir,*,token=None,stop=None,clock=None,monotonic=time.
                     p=root/(nonce+'.progress.json');progress=json.loads(p.read_text()) if p.exists() else None
                     if progress and (progress['nonce']!=nonce or progress['pid']!=child.pid or progress['stage'] not in STAGE_TIMEOUT):raise RecoveryStop('RECOVERY_PROGRESS_IDENTITY')
                     if progress and (type(progress['monotonic']) not in (int,float) or not math.isfinite(progress['monotonic']) or progress['monotonic']>monotonic()+.1):raise RecoveryStop('RECOVERY_PROGRESS_CLOCK')
+                    if progress:sender_status(progress)
                     age=monotonic()-(progress['monotonic'] if progress else started)
                     limit=STAGE_TIMEOUT[progress['stage']] if progress else STAGE_TIMEOUT['STARTING']
                     if not requested and (ended() or age>limit):
@@ -309,10 +330,12 @@ def supervise(plan,control_dir,*,token=None,stop=None,clock=None,monotonic=time.
                 progress=json.loads(p.read_text()) if p.exists() else None
                 if progress and (progress['nonce']!=nonce or progress['pid']!=child.pid or progress['stage'] not in STAGE_TIMEOUT):raise RecoveryStop('RECOVERY_PROGRESS_IDENTITY')
                 if result and (result['nonce']!=nonce or result['pid']!=child.pid):raise RecoveryStop('RECOVERY_RESULT_IDENTITY')
-                outcome=result['state'] if result else 'CRASH' if returncode in CRASH_SIGNALS else 'UNKNOWN_EXIT'
+                if returncode==0 and result:outcome=result['state']
+                else:outcome='CRASH' if returncode in CRASH_SIGNALS else 'UNKNOWN_EXIT'
                 stage=progress['stage'] if progress else 'STARTING'
                 retry=(outcome in RETRY_STATES or outcome=='CRASH' and stage=='OBSERVING' or requested=='STALLED' and outcome=='SIGNAL_STOP')
                 if result and result.get('error'):retry=False
+                if result:sender_status(result)
                 entry.update(state=outcome,returncode=returncode,finished_ms=clock(),error=result.get('error') if result else None,reason=result.get('reason') if result else None);state.update(active=None,retry=retry)
                 child=None;save(outcome)
                 if requested=='STOP':break
@@ -342,7 +365,8 @@ def main():
         for sig in (signal.SIGTERM,signal.SIGINT):signal.signal(sig,lambda *_:stop.set())
         token=sys.stdin.readline(4096).strip() if plan.config.telegram_enabled else None
         result=supervise(plan,args.control_dir,token=token,stop=stop)
-        print(canonical({'status':result['status'],'attempts':len(result['attempts']),'restarts':len(result['restarts'])}))
+        print(canonical({'status':result['status'],'attempts':len(result['attempts']),'restarts':len(result['restarts']),
+            **{k:result[k] for k in ('telegram_enabled','telegram_disabled_reason') if k in result}}))
         return 0 if result['status'] in ('DEADLINE','STOPPED','ALL_MARKETS_CLOSED_OR_LOCAL_DATE_ENDED') else 2
 
 

@@ -349,7 +349,8 @@ class DayDiscovery:
 
 
 def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=None, token=None,
-                      clock=None, monotonic=time.monotonic, stop=None, wait=None, progress=None, session_day=None):
+                      clock=None, monotonic=time.monotonic, stop=None, wait=None, progress=None, session_day=None,
+                      on_sender_status=None):
     """Finite session with local-day revalidation; no service or extended deadline."""
     import threading
     from websockets.exceptions import WebSocketException
@@ -362,6 +363,15 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
     if cfg.telegram_enabled and not token:raise ValueError('EXPLICIT_TELEGRAM_TOKEN_REQUIRED')
     sender=Sender(token,**({'transport':transport} if transport else {}),minimum_interval_ms=3100) if cfg.telegram_enabled else None
     result={'cities':{},'state':'PREPARING','telegram_enabled':cfg.telegram_enabled,'weather_enabled':False}
+    reported_sender=None
+    def sender_status():
+        nonlocal reported_sender
+        value=sender.status() if sender else dict(telegram_enabled=False,telegram_disabled_reason='NOT_ENABLED_IN_CONFIG')
+        if value!=reported_sender:
+            reported_sender=value
+            result.update(value)
+            if on_sender_status:on_sender_status(value)
+    sender_status()
     progress=progress or (lambda stage:None)
     progress('STARTING')
     with CatalogueStore(cfg) as store:
@@ -440,7 +450,7 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
                                 # Always recheck lifecycle immediately before send,
                                 # including between throttled global market scans.
                                 store.expire_closed_deliveries(at)
-                                if sender:sender.tick(store,at)
+                                if sender:sender.tick(store,at);sender_status()
                                 else:advance_waits(store,at)
                                 elapsed=round((monotonic()-delivery_start)*1000,3)
                                 telemetry['delivery_ticks']+=1
@@ -502,7 +512,7 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
             store.gap('CATALOGUE_SESSION_ENDED',clock())
             result['reconnects']=reconnects
             if telemetry.get('connected_ms'):telemetry.update(native_timing(ws))
-            if sender:sender.close(store)
+            if sender:sender.close(store);sender_status()
             if stop.is_set():result['state']='SIGNAL_STOP'
             result['transport']=store.transport_record({'kind':'STOPPED','at_ms':clock(),'state':result['state'],'reconnects':reconnects},telemetry)
             result['counters']={'router':dict(router.counters),'markets':{k:dict(v) for k,v in router.per_market.items()}}
@@ -513,7 +523,7 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
             result['data_bytes']=store.usage()
             return result
         finally:
-            if sender:sender.close(store)
+            if sender:sender.close(store);sender_status()
 
 
 def main():
