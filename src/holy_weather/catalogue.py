@@ -343,6 +343,7 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
     from websockets.exceptions import WebSocketException
     from .app import WS,millis
     from .telegram import Sender
+    from .alert_queue import advance_waits
     if connect is None:
         from websockets.sync.client import connect
     clock=clock or millis;stop=stop or threading.Event();wait=wait or stop.wait
@@ -418,6 +419,7 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
                             # turn, including between throttled global scans.
                             store.expire_closed_deliveries(at)
                             if sender:sender.tick(store,at)
+                            else:advance_waits(store,at)
                             if monotonic()>=next_stats:
                                 store.set_meta('catalogue_counters',{'router':dict(router.counters),'markets':{k:dict(v) for k,v in router.per_market.items()}})
                                 telemetry['subscribed_tokens']=len(live_tokens)
