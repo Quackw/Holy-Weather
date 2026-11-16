@@ -16,7 +16,8 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: python -m pip install --index-url https://pypi.org/simple -c requirements-dev.lock -e '.[test]'
       - name: Prepare isolated dependency rollback
-        run: python -m pip install --index-url https://pypi.org/simple --only-binary=:all: --no-deps --target "$RUNNER_TEMP/websockets-17.1" 'websockets==17.1'
+        run: |
+          python -m pip install --index-url https://pypi.org/simple --only-binary=:all: --no-deps --target "$RUNNER_TEMP/websockets-17.1" 'websockets==17.1'
       - name: Build pinned wheel
         run: python -m pip wheel --index-url https://pypi.org/simple --no-deps --wheel-dir "$RUNNER_TEMP/holy-weather-dist" .
       - run: python -B tools/check_source.py
