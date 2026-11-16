@@ -1,4 +1,4 @@
-# PRICE delivery — final PR 17 candidate
+# PRICE delivery — grouping and delivered levels
 
 PRICE detection is unchanged: Decimal midpoint of the real side token, upward
 50/55/60/70/80%, once per market/side/threshold, REARM=false. One MULTI-CROSS per
@@ -97,6 +97,26 @@ Compatible rollback reads the added queue fields without changing data. The old
 code can send lower levels again for future events, but admission refusals already
 recorded by this version remain final: no old-event backfill. Keep current SQLite,
 fired thresholds, raw evidence and SENT/UNKNOWN; never restore an old database.
+
+## Reconciliation with the accepted receive loop
+
+PR #25 includes accepted main `7327f03` (PR #26) without changing its catalogue
+receive loop. Only `alert_queue.py` differs at runtime from that main. The bounded
+50 ms delivery cadence continues to check market lifecycle before sending; this
+policy adds no socket timeout, buffering, freshness or storage change.
+
+Offline full-observer checks in both regional configurations cover three ordinary
+50/55/60 events in one card, a delivered NO80 covering a subsequent NO70 event,
+and new YES70/80 in a separate priority card. All original event IDs and evidence
+remain; the covered NO70 has an explicit reason and link to NO80. Priority work
+keeps the existing sender pacing without an ordinary ten-second wait. Restart
+on the same SQLite neither sends again nor rearms a level. These checks use fake
+quotes and ACKs and are not new live-delivery evidence.
+
+The compatible queue rollback is pinned to that exact accepted main. Fixed real
+history replays retain original source SHA/clocks and compare both policies on
+the same inputs; virtual delivery timings are labelled separately from actual
+Telegram ACKs. No running observer is updated by reconciliation or acceptance.
 
 ## Compatibility and rollback
 

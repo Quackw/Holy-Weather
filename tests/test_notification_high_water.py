@@ -188,7 +188,7 @@ def test_accepted_queue_rollback_preserves_new_history_and_no_backfill(cfg,marke
     import holy_weather.alert_queue as candidate
     old=types.ModuleType('holy_weather.accepted_queue');old.__package__='holy_weather'
     root=Path(__file__).resolve().parents[1]
-    exec(subprocess.check_output(['git','show','6f45015:src/holy_weather/alert_queue.py'],cwd=root),old.__dict__)
+    exec(subprocess.check_output(['git','show','7327f03d5402894fadef66657df940f4dfa7e176:src/holy_weather/alert_queue.py'],cwd=root),old.__dict__)
     cfg=config(cfg)
     with Store(cfg) as s:
         start(s,market,make_raw)
@@ -208,5 +208,74 @@ def test_accepted_queue_rollback_preserves_new_history_and_no_backfill(cfg,marke
         feed(s,market,make_raw,'0.57','0.61',AT+17000);feed(s,market,make_raw,'0.61','0.63',AT+18000)
         assert len(keys(s))==2
         assert s.c.execute("select count(*) from events where type='PRICE_ALERT'").fetchone()[0]==4
+        assert s.c.execute('pragma integrity_check').fetchone()[0]=='ok'
+        assert not s.c.execute('pragma foreign_key_check').fetchall()
+
+
+@pytest.mark.parametrize('region',['europe','us'])
+def test_current_catalogue_pump_groups_covers_and_preserves_highs_on_restart(gamma,tmp_path,monkeypatch,region):
+    """Full finite observer with PR26's delivery cadence; offline quotes/ACK only."""
+    from collections import deque
+    from holy_weather.catalogue import CatalogueConfig,CatalogueStore,observe_catalogue
+    from holy_weather.core import Config
+    from holy_weather.discovery import select
+    from holy_weather.telegram import Sender
+    from test_catalogue import setup
+    from test_catalogue_recovery import message
+    from conftest import NOW
+    if region=='europe':
+        cfg,markets=setup(gamma,tmp_path,1);m,receipt=markets[0];city='london'
+    else:
+        city='new-york';cfg=CatalogueConfig(region='us',city=city,data_dir=str(tmp_path/'catalogue'))
+        m=select(gamma,Config(city=city,bucket='46-47°F'),now=NOW)
+        receipt={'received_at':NOW.isoformat(),'raw_body':json.dumps(gamma)}
+    cfg=replace(config(cfg),duration_seconds=16,telegram_enabled=True)
+    ticks=[0];senders=[];sent=[]
+    class TrackedSender(Sender):
+        def __init__(self,*a,**kw):super().__init__(*a,**kw);senders.append(self)
+    monkeypatch.setattr('holy_weather.telegram.Sender',TrackedSender)
+    monkeypatch.setattr('holy_weather.telegram.millis',lambda:AT+ticks[0])
+    pending=deque([(10,'YES','0.49'),(15,'NO','0.79'),(20,'YES','0.51'),
+        (25,'YES','0.56'),(30,'YES','0.61'),(35,'NO','0.81'),
+        (1000,'NO','0.69'),(1010,'NO','0.71'), # Lower after a delivered NO80.
+        (11000,'YES','0.49'),(11010,'YES','0.71'),(11020,'YES','0.81')])
+    class WS:
+        def __enter__(self):return self
+        def __exit__(self,*args):pass
+        def send(self,raw):pass
+        def recv(self,timeout):
+            if senders[-1].thread:senders[-1].thread.join(1)
+            assert 0<timeout<=.051
+            ticks[0]+=5
+            if pending and pending[0][0]<=ticks[0]:
+                _,side,p=pending.popleft()
+                return message(m,m['tokens'][side],p,AT+ticks[0])
+            return 'PONG'
+    def run(seconds):
+        return observe_catalogue(replace(cfg,duration_seconds=seconds),
+            discover=lambda c:([m],receipt,[]) if c==city else ([],{},[]),
+            connect=lambda *a,**kw:WS(),clock=lambda:AT+ticks[0],monotonic=lambda:ticks[0]/1000,
+            token='offline',transport=lambda token,p:(sent.append((p,ticks[0])) or {'status':'SENT','message_id':len(sent)}))
+    r=run(16)
+    assert r['price_events']==7 and r['deliveries']=={'SENT':3}
+    assert len(sent)==3 and 'Crossed: 80%' in sent[0][0]['html'] and sent[0][1]<=100
+    assert 'Crossed: 50% · 55% · 60%' in sent[1][0]['html']
+    assert 'Crossed: 70% · 80%' in sent[2][0]['html']
+    assert 0<sent[2][1]-11010<4000 # Existing 3.1s pacing, no ordinary batch wait.
+    with CatalogueStore(cfg,session=False) as s:
+        events=[json.loads(x[0]) for x in s.c.execute("select payload from events where type='PRICE_ALERT' order by received_ms")]
+        assert events[4]['thresholds']==['0.70']
+        assert events[4]['delivery_admission']['reason']=='DELIVERED_HIGHER_LEVEL'
+        assert events[4]['delivery_admission']['covered_by']['threshold']=='0.80'
+        before={k:value(s,k) for k in keys(s)}
+        assert sorted(len(v['event_ids']) for v in before.values())==[1,2,3]
+        represented=[i for v in before.values() for i in v['event_ids']]
+        assert len(represented)==len(set(represented))==6
+    pending.extend([(ticks[0]+10,'YES','0.49'),(ticks[0]+15,'NO','0.69'),
+                    (ticks[0]+20,'YES','0.81'),(ticks[0]+25,'NO','0.81')])
+    r=run(1)
+    assert r['price_events']==7 and r['deliveries']=={'SENT':3} and len(sent)==3
+    with CatalogueStore(cfg,session=False) as s:
+        assert {k:value(s,k) for k in keys(s)}==before
         assert s.c.execute('pragma integrity_check').fetchone()[0]=='ok'
         assert not s.c.execute('pragma foreign_key_check').fetchall()
