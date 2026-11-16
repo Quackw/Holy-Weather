@@ -383,6 +383,7 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
                 result['state']='COMPLETED_WINDOW'
                 telemetry={'attempt':reconnects+1,'connect_started_ms':clock(),'subscribed_tokens':0,'frames':0,'max_frame_bytes':0,
                            'processing_ms_total':0,'processing_ms_max':0,'maintenance_ms_max':0,
+                           'delivery_ticks':0,'delivery_ms_total':0,'delivery_ms_max':0,
                            'application_last_pong_ms':None,'application_last_ping_ms':None,'last_frame_ms':None}
                 store.transport_record({'kind':'CONNECTING','at_ms':clock(),'attempt':reconnects+1},telemetry)
                 ws=None
@@ -400,7 +401,7 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
                         subscribed=min(16,len(tokens));live_tokens=set(tokens[:16]);next_subscription=monotonic()+1
                         telemetry['subscribed_tokens']=len(live_tokens)
                         last_ping=monotonic();last_pong=last_ping;next_stats=last_ping
-                        next_maintenance=last_ping
+                        next_maintenance=next_delivery=last_ping
                         while not stop.is_set() and monotonic()<deadline:
                             at=clock()
                             if days.due():break
@@ -421,11 +422,21 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
                                 telemetry['subscribed_tokens']=len(live_tokens)
                                 telemetry['maintenance_ms_max']=max(telemetry['maintenance_ms_max'],round((monotonic()-maintenance_start)*1000,3))
                                 next_maintenance=monotonic()+.25
-                            # Queue eligibility must see lifecycle changes on every
-                            # turn, including between throttled global scans.
-                            store.expire_closed_deliveries(at)
-                            if sender:sender.tick(store,at)
-                            else:advance_waits(store,at)
+                            # Drain market frames between delivery scans. Repeating
+                            # global queue transactions per frame can backpressure
+                            # the bounded receiver, including native PONG reads.
+                            if monotonic()>=next_delivery:
+                                delivery_start=monotonic()
+                                # Always recheck lifecycle immediately before send,
+                                # including between throttled global market scans.
+                                store.expire_closed_deliveries(at)
+                                if sender:sender.tick(store,at)
+                                else:advance_waits(store,at)
+                                elapsed=round((monotonic()-delivery_start)*1000,3)
+                                telemetry['delivery_ticks']+=1
+                                telemetry['delivery_ms_total']+=elapsed
+                                telemetry['delivery_ms_max']=max(telemetry['delivery_ms_max'],elapsed)
+                                next_delivery=monotonic()+.05
                             if monotonic()>=next_stats:
                                 store.set_meta('catalogue_counters',{'router':dict(router.counters),'markets':{k:dict(v) for k,v in router.per_market.items()}})
                                 telemetry['subscribed_tokens']=len(live_tokens)
@@ -435,7 +446,7 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
                             if monotonic()-last_pong>25:raise TimeoutError('APPLICATION_HEARTBEAT_TIMEOUT')
                             if monotonic()-last_ping>=10:
                                 ws.send('PING');last_ping=monotonic();telemetry['application_last_ping_ms']=clock()
-                            try:raw=ws.recv(timeout=min(1,max(.01,deadline-monotonic())))
+                            try:raw=ws.recv(timeout=min(1,max(.001,min(deadline,next_delivery)-monotonic())))
                             except TimeoutError:continue
                             if raw=='PONG':
                                 last_pong=monotonic();telemetry['application_last_pong_ms']=clock();continue
