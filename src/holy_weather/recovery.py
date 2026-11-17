@@ -328,13 +328,16 @@ def supervise(plan,control_dir,*,token=None,stop=None,clock=None,monotonic=time.
                 nonce=uuid.uuid4().hex;entry=dict(nonce=nonce,at_ms=clock(),recovery=retry)
                 if plan.continuous:entry['guard_protocol']=lifecycle.PROTOCOL
                 elif retry:state['restarts'].append(clock())
-                state['attempts'].append(entry);state['active']=nonce;state.pop('next_ms',None);save('STARTING')
+                state['attempts'].append(entry);state['active']=nonce;state.pop('next_ms',None)
+                # The paid recovery belongs to this durable launch intent. Keep
+                # it through BACKOFF, but never let an interrupted spawn reuse it.
+                state.pop('recovery_charged',None);save('STARTING')
                 if ended():
                     entry.update(state='CANCELLED_BEFORE_SPAWN',finished_ms=clock());state.update(active=None,retry=False)
                     if retry and not plan.continuous:state['restarts'].pop()
                     break
                 child=_spawn(root,nonce,token,guard_fd) if plan.continuous else _spawn(root,nonce,token)
-                entry['pid']=child.pid;state.pop('recovery_charged',None);save('RUNNING')
+                entry['pid']=child.pid;save('RUNNING')
                 child.stdin.write((token or '')+'\n');child.stdin.flush();child.stdin.close()
                 started=monotonic();requested=None;requested_at=None;progress=None
                 while child.poll() is None:
