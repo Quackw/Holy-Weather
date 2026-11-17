@@ -29,6 +29,8 @@ from .storage import StorageStop
 from . import lifecycle
 
 CONTROL_BYTES=1024*1024
+ARCHIVE_TRIGGER_BYTES=128*1024*1024
+ARCHIVE_CANDIDATE_LIMIT_BYTES=160*1024*1024
 MAX_ATTEMPTS=160
 BACKOFF_SECONDS=30
 RETRY_STATES={'RECONNECT_BUDGET_EXHAUSTED','NETWORK_GAP_NO_RETRY'}
@@ -188,7 +190,7 @@ def checkpoint(plan,progress):
     if plan.archive_dir is None:return
     from .history import prepare,adopt,digest
     data=Path(plan.config.data_dir);db=data/'monitor.sqlite3'
-    if db.stat().st_size<128*1024*1024:return
+    if db.stat().st_size<ARCHIVE_TRIGGER_BYTES:return
     progress('ARCHIVE');parts=Path(plan.archive_dir)
     if parts==data or data in parts.parents or parts in data.parents:raise RecoveryStop('RECOVERY_ARCHIVE_DATA_OVERLAP')
     parts.mkdir(mode=0o700,parents=True,exist_ok=True);private(parts,True)
@@ -199,8 +201,9 @@ def checkpoint(plan,progress):
     # After an abrupt writer exit, let SQLite recover committed WAL under its
     # normal single-writer lock before the explicit closed-writer checkpoint.
     with CatalogueStore(plan.config,session=False):pass
-    part=parts/('part-'+str(count+1).zfill(3));m=prepare(data,part,expected_sha=digest(db))
-    if m['candidate_bytes']>160*1024*1024:raise RecoveryStop('RECOVERY_ARCHIVE_HEADROOM')
+    part=parts/('part-'+str(count+1).zfill(3))
+    m=prepare(data,part,expected_sha=digest(db),compact_price_inputs=plan.continuous)
+    if m['candidate_bytes']>ARCHIVE_CANDIDATE_LIMIT_BYTES:raise RecoveryStop('RECOVERY_ARCHIVE_HEADROOM')
     adopt(data,part,cleanup=True)
 
 

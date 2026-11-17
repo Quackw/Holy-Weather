@@ -39,6 +39,14 @@ It is bounded to 96 MiB decoded, checked for hash/order/length, and searched in
 packed bytes. It never guesses from a probabilistic filter. Corrupt or oversized
 state fails closed. No alert rule, formula, time, threshold or expiry changes.
 
+At a closed continuous PRICE catalogue checkpoint, unreferenced market inputs
+are retained in the full archive. The successor starts with a new baseline. The
+15-minute research-event window and all its evidence stay in the working SQLite,
+along with every PRICE/queue/state reference, the input ID high-water and non-market
+receipts. The exact duplicate index still covers inputs moved to the archive.
+The manifest records this policy. Finite and manual preparation keep their
+existing retention policy.
+
 `adopt` is a separate explicit operation. It rechecks source/candidate/archive
 SHA, WAL, lock, integrity and headroom, writes a one-time intent and atomically
 replaces only the stopped working SQLite. An existing intent forbids a blind retry.
