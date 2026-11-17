@@ -1,8 +1,10 @@
 # HOLY WEATHER architecture
 
-Reconciled with accepted runtime main `937d3bc` (PR #22, 16 November 2026).
+Runtime baseline `8d176109b80628716f745b210d87bca00c5c51ed` (PR #30, 17 November 2026).
 One project, independent PRICE/LAMP algorithms, shared durable queue implementation,
-one Telegram bot. No trading, own forecast model, LOCK strategy or production service.
+one Telegram bot. Separately approved continuous PRICE services are installed;
+weather/LAMP remains optional single-contract functionality. No trading, own
+forecast model or LOCK strategy.
 
 ## Entry points and ownership
 
@@ -10,12 +12,16 @@ one Telegram bot. No trading, own forecast model, LOCK strategy or production se
   US AWC/LAMP context; stops at the contract's local-day end.
 - `catalogue.observe_catalogue`: PRICE-only contracts for `--region europe`
   (11 profiles) or `--region us` (10); shared code, separate directories/rule hashes.
+- `service.run` / `recovery.supervise`: approved continuous regional plan, systemd
+  credential, persistent controller and workers of at most 1,200 seconds.
 
 One POSIX lock and main-thread SQLite writer own each directory. Regions do not
-share a writable database or merged subscriptions. Queue/sender state is local to
-each run; one bot/channel is not a global cross-process pacing coordinator.
-Both entry points are finite: default 120 seconds, configured maximum one hour.
-No daemon, supervisor, installer or autonomous daily schedule exists.
+share a writable database or merged subscriptions. Durable queue state is regional;
+each process owns its sender. One bot/channel is not a global pacing coordinator.
+Direct app/catalogue entry points are finite: default 120 seconds, configured
+maximum one hour. The continuous parent opens successive bounded workers and
+retains local-day discovery/recovery state. Installation is separately authorized;
+see [runtime/transition contract](docs/PRICE_CONTINUOUS.md).
 
 ## Inputs and atomic events
 
@@ -91,8 +97,23 @@ attempts per city/date, five minutes apart. Refresh closes the shared socket and
 records a gap; all current tokens need new baselines. Old markets are not a
 fallback, old pending cards expire, and historical identities remain in SQLite.
 Only the latest retained date per station loads into the bounded 176-market
-memory registry. Rollover does not extend the run deadline. See
+memory registry. Rollover does not extend a finite worker's deadline; the continuous
+parent opens another window. Old legacy day refusals remain in the audit while
+current markets are rechecked under the corrected lifecycle. See
 [local-day behavior](docs/PRICE_DAY_ROLLOVER.md).
+
+Continuous ownership includes boot ID, PID, start ticks, UID and executable. The
+child inherits the controller flock before exec. Recovery debt is durable before
+backoff; the same durable STARTING write consumes its charged marker before spawn,
+so an interrupted launch cannot reuse the previous attempt's recovery. Limits are
+three recoveries/hour and six/rolling 24 hours, with 30-second exponential backoff
+capped at 300 seconds. Manual/fatal stops latch; systemd does not restart exit 78.
+There is no independent controller watchdog or OnFailure notification in the unit.
+
+Worker rotation and archive maintenance create a real gap and require new
+baselines. Recovery preparation explicitly expires pending cards, including cards
+still inside their quote TTL at a planned boundary. Source events remain; this is
+a known delivery limitation, not successful delivery. SENT/UNKNOWN never requeue.
 
 ## Storage, maintenance and rollback
 
@@ -107,8 +128,15 @@ Explicit prune previews first and requires a stopped matching writer/config.
 Unaudited events have a 30-day policy and unreferenced inputs 24 hours;
 delivery-audited events, receipts, referenced evidence and latest snapshots stay
 protected. SQLite free pages can be reused; physical shrinking is not promised.
-No automatic archive/reclamation or indefinite-history budget is qualified.
-Real daily growth and current-build fleet peaks remain unqualified.
+Separately authorized continuous plans archive only between closed workers, at
+128 MiB: full verified history precedes adoption of a candidate at most 160 MiB.
+Per-region archives are bounded at 4 GiB/40 parts, packed dedupe at 96 MiB and
+free disk at a minimum 2 GiB. Events, fired levels, receipts, identities and their
+evidence remain recoverable across working data and archives. Only verified
+redundant scratch copies retire. Closed control attempts are audited into SQLite
+before redundant files retire; active control remains bounded at 1 MiB. These
+limits can stop observation. Local archives are not independent off-server backup,
+and initial live measurements do not establish a daily retention budget.
 
 Compatible code/config rollback retains the current database, new history,
 fired levels and receipts. Never restore an old database over new data.
@@ -118,7 +146,12 @@ backups are recovery evidence, not a reason to rewind working data.
 
 ## Qualification boundary
 
-Accepted source has offline Linux tests, exact-source rollback and saved-stream
-replay. Historical live quotes/ACKs are separate evidence. Current-build live
-delivery, midnight/restart and sustained resources still need qualification
-before separately authorized permanent deployment. See [ROADMAP](docs/ROADMAP.md).
+The runtime baseline passed 785 tests on each Linux/Python 3.11 and 3.13.5,
+exact-source rollback and saved-stream replay. The actual systemd path was tested
+with synthetic I/O on a disposable runner. Separately approved installation
+completed two natural windows per region and real new Telegram ACKs. These facts
+do not prove every city's readiness, a real host reboot, overnight/DST behavior
+or full 24-hour reliability. Keepalive-timeout root cause, pending-card boundary
+expiry, independent health escalation and continuing off-server backup remain
+open. See the dated [operations record](docs/OPERATIONS.md) and
+[ROADMAP](docs/ROADMAP.md).

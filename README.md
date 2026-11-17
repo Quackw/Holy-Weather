@@ -1,28 +1,27 @@
 # HOLY WEATHER
 
-Prepared continuous PRICE runtime (not installed):
-[ownership, systemd templates, transition and current-data rollback](docs/PRICE_CONTINUOUS.md).
-Existing finite observations are unaffected; merge and server cutover need separate authorization.
-
 Independent Python monitor of public Polymarket temperature contracts. **One
 project, two independent algorithms, one Telegram bot.** The regional catalogue
 currently runs PRICE only; optional US AWC/LAMP remains in the single-contract
 observer. No trading, probabilities, LOCK strategy or own Tmax model.
 
-Reconciled with accepted main **`937d3bc` (16 November 2026, PR #22)**. This is a
-source/evidence baseline, not an installed server version. The repository is
-currently **public**; see [ROADMAP](docs/ROADMAP.md) for the read-only protection
-snapshot, accepted work and remaining qualification.
+Runtime baseline: **`8d176109b80628716f745b210d87bca00c5c51ed`** (17 November 2026,
+PR #30). A separately approved installation started permanent Europe/US PRICE
+services that day. The dated [operations record](docs/OPERATIONS.md) separates
+installed source, real quotes/deliveries and remaining 24/7 qualification. The
+repository remains **public**; enforced main protection and accepted work are in
+[ROADMAP](docs/ROADMAP.md).
 
 ## Implemented capabilities
 
 | Component | Accepted behavior | Qualification boundary |
 | --- | --- | --- |
-| PRICE ALERT | Real YES/NO token Decimal midpoint; upward 50/55/60/70/80%; once-only, REARM=false | Detector, persistence, GAP/restart and rollback tests; finite historical live evidence |
-| Regional catalogue | One codebase; Europe 11 profiles or US 10 profiles, separate regional directories | Database/config compatibility tested; current full-fleet live readiness not claimed |
-| Notification filter | Opt-in bid confirmation, fast priority 70/80, ordinary same-bucket/side grouping | Historical comparison and offline integration tests; current-build live delivery still needs qualification |
-| Shared Telegram queue | Atomic event/enqueue, explicit refusal/outcome, SENT/UNKNOWN restart protection | Accepted implementation and historical ACK evidence; no permanent sender deployment |
-| Local-day rollover | Catalogue rediscovery and new baselines within its finite deadline | Date/DST/restart tests; current-build live midnight acceptance remains open |
+| PRICE ALERT | Real YES/NO token Decimal midpoint; upward 50/55/60/70/80%; once-only, REARM=false | Detector, GAP/restart and rollback tests; genuine events/ACKs on the installed baseline |
+| Regional catalogue | One codebase; Europe 11 profiles or US 10 profiles, separate regional directories | Both services installed; per-city/token PRICE readiness must still be checked separately |
+| Notification filter | Opt-in bid confirmation, fast priority 70/80, ordinary same-bucket/side grouping | Historical comparison, integration tests and real priority ACKs; explicit refusals retained |
+| Shared Telegram queue | Atomic event/enqueue, explicit refusal/outcome, SENT/UNKNOWN restart protection | Real ACKs after worker rotation; pending cards can expire at a planned worker boundary |
+| Local-day rollover | Catalogue rediscovery and new baselines; continuous controller opens bounded workers | Date/DST/restart tests; current-build live overnight acceptance remains open |
+| Continuous recovery/history | Persistent recovery budgets, inherited ownership locks, bounded archive/control rotation | Linux/systemd tests and two natural windows per installed region; real host reboot/24 hours unproven |
 | US weather/LAMP | Optional observations/original hourly context; independent KLGA LAMP ALERT | Accepted finite components; disabled in the regional catalogue |
 
 PRICE rules were checked against the retained original `@holy_nfx_bot` source;
@@ -77,8 +76,10 @@ A matching single-contract config enables PRICE with `price_alert_enabled = true
 and `alert_queue_enabled = true`; filtering is independently opt-in. Select the
 exact current native bucket before a run. The single-contract observer stops
 at its local-day end; **automatic rediscovery belongs to the catalogue**.
-Both entry points remain finite: default 120 seconds, configured maximum one hour.
-There is no permanent supervisor or automatic daily schedule.
+Both direct entry points remain finite: default 120 seconds, configured maximum
+one hour. The separate [continuous runtime](docs/PRICE_CONTINUOUS.md) opens workers
+of at most 20 minutes under a persistent controller; it requires its own approved
+plan, installation and sending authority.
 
 ## Quotes, delivery and storage
 
@@ -99,9 +100,12 @@ per-event admission/refusal. UNKNOWN is not retried. Free queue slots do not
 mean free physical disk. SQLite remains schema v1; changed quotes and referenced
 evidence are retained. Unchanged confirmations coalesce with 15-second checkpoints.
 The **256-MiB** guard includes database/WAL/SHM/logs and stops capture before its
-reserve is exhausted. Long-run storage/archiving is not qualified; see
-[ARCHITECTURE](ARCHITECTURE.md). Explicit maintenance requires the stopped matching
-writer/configuration; generic single-contract maintenance is not a regional reader.
+reserve is exhausted. The approved continuous plan checks for archival between
+closed workers at 128 MiB, retaining full history under separate 4-GiB/40-part
+archive and 96-MiB packed dedupe bounds. These are finite capacities, not indefinite
+retention. See [ARCHITECTURE](ARCHITECTURE.md). Additional maintenance requires the
+stopped matching writer/configuration and separate authority; a status check must
+not invoke maintenance.
 
 ## Optional US weather and LAMP
 
@@ -125,12 +129,13 @@ weather/LAMP flags. Forecast expansion is not a prerequisite for PRICE acceptanc
 .venv/bin/python -B -m pytest -q
 ```
 
-Accepted main's [post-merge CI](https://github.com/Quackw/Holy-Weather/actions/runs/43878233806)
-passed **590 tests** on each of Ubuntu/Python **3.11** and **3.13.5**, including
-wheel/source checks and isolated rollback. An ordinary local run skips two
-dependency-rollback cases unless `HOLY_WEATHER_WEBSOCKETS_ROLLBACK_DIR` points to
-a separately prepared 17.1 import directory. CI prepares it without downgrading
-the application. Exact-source rollback also needs the retained local Git history.
+The runtime baseline's [post-merge CI](https://github.com/Quackw/Holy-Weather/actions/runs/44083496660)
+passed **785 tests** on each of Ubuntu/Python **3.11** and **3.13.5**, including
+wheel/source checks and isolated rollback. Its Python 3.11 job also qualified the
+actual systemd/controller path with a dummy credential and synthetic child on the
+disposable runner. This was not a Netcup reboot. Local platform-specific tests
+may skip; dependency rollback needs `HOLY_WEATHER_WEBSOCKETS_ROLLBACK_DIR` pointing
+to a separate 17.1 import directory. Exact-source rollback needs retained Git history.
 
 Tests are offline/synthetic. Real captures, receipts, databases, backups and
 secrets stay out of Git. SHA-bound replay preserves original availability clocks.
