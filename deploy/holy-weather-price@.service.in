@@ -9,7 +9,6 @@ StartLimitBurst=4
 [Service]
 Type=exec
 User=polymeteo-agent
-Group=polymeteo-agent
 WorkingDirectory=@RELEASE@
 ExecStart=@RELEASE@/venv/bin/python -B -m holy_weather.service run --plan /etc/holy-weather/%i.json --control-dir /var/lib/holy-weather/%i/control
 ExecStop=@RELEASE@/venv/bin/python -B -m holy_weather.service stop-intent --control-dir /var/lib/holy-weather/%i/control

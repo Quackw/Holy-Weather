@@ -53,6 +53,7 @@ def await_state(path,predicate,seconds=55):
 def main():
     if os.geteuid()!=0 or os.environ.get('GITHUB_ACTIONS')!='true' or Path('/proc/1/comm').read_text().strip()!='systemd':
         raise SystemExit('Disposable GitHub runner with real systemd/root required')
+    os.umask(0o077)  # Same private bootstrap as the actual service entry point.
     from dataclasses import replace
     from holy_weather.catalogue import CatalogueConfig,CatalogueStore
     from holy_weather.recovery import Plan
@@ -66,7 +67,7 @@ def main():
     encrypted=base/'telegram.encrypted'
     command('/usr/bin/systemd-creds','encrypt','--with-key=host','--name=telegram','-',str(encrypted),input='123456:'+'offline_test_only_'*3)
     template=(root/'deploy/holy-weather-price@.service.in').read_text()
-    unit=template.replace('@RELEASE@',str(base)).replace('User=polymeteo-agent','User=root').replace('Group=polymeteo-agent','Group=root')
+    unit=template.replace('@RELEASE@',str(base)).replace('User=polymeteo-agent','User=root')
     unit=unit.replace('WorkingDirectory='+str(base),'WorkingDirectory='+str(root))
     unit=unit.replace(str(base)+'/venv/bin/python -B -m holy_weather.service',sys.executable+' -B '+str(probe))
     unit=unit.replace('/etc/holy-weather/%i.json',str(base/'plan.json')).replace('/var/lib/holy-weather/%i/control',str(base/'control'))

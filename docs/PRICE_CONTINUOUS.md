@@ -232,3 +232,9 @@ approved real Netcup reboot must verify credential decryption, exact loaded sour
 no second writer and continued current data. Until then **24/7 = NOT PROVEN**.
 Daily data/archive consumption remains NOT MEASURED for this prepared build; no
 short synthetic test is extrapolated to guaranteed daily storage.
+
+Local synthetic 200-window measurement: 21,001 bytes active control, 20 retained
+attempts, six audit batches / 221,556 JSON bytes in a 307,200-byte closed SQLite;
+integrity OK. This tiny offline fixture is not a mature-region storage or RSS
+benchmark. Worker rotation/maintenance deliberately introduces a short gap and new
+baseline; price movement entirely inside that gap may be missed, never inferred.
