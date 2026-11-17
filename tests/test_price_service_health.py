@@ -1,6 +1,6 @@
 """Isolated service health and recovery; no live databases, systemd or Telegram."""
 from dataclasses import replace
-import json,os,socket,tempfile,threading
+import importlib.util,json,os,socket,tempfile,threading
 from pathlib import Path
 from unittest.mock import patch
 import pytest
@@ -13,6 +13,17 @@ def test_unit_supervises_controller_not_its_worker():
     unit=(Path(__file__).resolve().parents[1]/'deploy/holy-weather-price@.service.in').read_text()
     assert 'WatchdogSec=360s' in unit and 'NotifyAccess=main' in unit
     assert 'SendSIGKILL=no' in unit and 'RestartPreventExitStatus=78' in unit
+
+
+def test_systemd_probe_accepts_only_exact_writer_and_controller_lock_refusals(gamma,tmp_path):
+    plan,_=seed(gamma,tmp_path)
+    path=Path(__file__).resolve().parents[1]/'tools/qualify_systemd.py'
+    spec=importlib.util.spec_from_file_location('offline_systemd_probe',path)
+    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    from holy_weather.catalogue import CatalogueStore
+    with r.owned_control(tmp_path/'control',plan.config.data_dir):
+        with CatalogueStore(plan.config,session=False):
+            module.assert_exclusive(plan.config,tmp_path/'control')
 
 
 def test_service_result_does_not_hide_disabled_delivery(gamma,tmp_path,monkeypatch,capsys):

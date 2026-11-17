@@ -91,6 +91,21 @@ def observing(control,state):
     return value['nonce']==state['active'] and value['pid']==state['attempts'][-1]['pid'] and value['stage']=='OBSERVING'
 
 
+def assert_exclusive(cfg,control):
+    from holy_weather.catalogue import CatalogueStore
+    from holy_weather.storage import StorageStop
+    from holy_weather.recovery import owned_control
+    try:
+        with CatalogueStore(cfg,session=False):pass
+    except StorageStop as exc:
+        if str(exc)!='WRITER_ALREADY_RUNNING':raise
+    else:raise AssertionError('SECOND_WRITER_ADMITTED')
+    try:
+        with owned_control(control,cfg.data_dir):pass
+    except BlockingIOError:pass
+    else:raise AssertionError('SECOND_CONTROLLER_ADMITTED')
+
+
 def main():
     if os.geteuid()!=0 or os.environ.get('GITHUB_ACTIONS')!='true' or Path('/proc/1/comm').read_text().strip()!='systemd':
         raise SystemExit('Disposable GitHub runner with real systemd/root required')
@@ -156,15 +171,7 @@ def main():
         terminal={k:v for k,v in before['delivery'].items() if json.loads(v)['status'] in ('SENT','UNKNOWN')}
         assert len(terminal)==2 and sum(json.loads(v)['status']=='UNKNOWN' for v in terminal.values())==1
         # Both independent locks reject another writer/controller while this child lives.
-        from holy_weather.recovery import owned_control
-        for lock in ('writer','controller'):
-            try:
-                if lock=='writer':
-                    with CatalogueStore(cfg,session=False):pass
-                else:
-                    with owned_control(base/'control',data):pass
-            except BlockingIOError:pass
-            else:raise AssertionError('SECOND_'+lock.upper()+'_ADMITTED')
+        assert_exclusive(cfg,base/'control')
         from holy_weather.lifecycle import process_identity,alive
         old_writer=process_identity(first['attempts'][-1]['pid']);assert old_writer
         parent=first['controller_process'];(base/'block-controller').touch()
@@ -172,10 +179,7 @@ def main():
         second=await_state(path,lambda s:observing(base/'control',s) and s['controller_process']!=parent
                            and s.get('telegram_disabled_reason')=='PREVIOUS_SEND_UNCONFIRMED',seconds=85)
         assert not alive(old_writer)
-        try:
-            with CatalogueStore(cfg,session=False):pass
-        except BlockingIOError:pass
-        else:raise AssertionError('SECOND_WRITER_AFTER_WATCHDOG')
+        assert_exclusive(cfg,base/'control')
         assert len(second['restarts'])==1 and second['attempts'][-1]['at_ms']>=second['restarts'][0]+30000
         journal=command('/usr/bin/journalctl','--no-pager','-u',unit_name,'-o','cat')
         assert 'Watchdog timeout' in journal
