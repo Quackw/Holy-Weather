@@ -1,7 +1,7 @@
-"""Opt-in finite PRICE supervision. No service installation or boot credentials.
+"""Opt-in regional PRICE supervision; bounded workers and one SQLite writer.
 
-The controller never writes SQLite. Its child is the sole writer; source data,
-fired levels and terminal receipts stay current across bounded process recovery.
+Closed-worker control audit uses the same writer lock; no parallel writer.
+Source data, fired levels and terminal receipts survive bounded recovery.
 """
 from contextlib import contextmanager
 from dataclasses import asdict,dataclass,replace
@@ -26,6 +26,7 @@ from .catalogue import CatalogueConfig,CatalogueStore,discover_city,observe_cata
 from .core import canonical,sha
 from .history import Seen,check as check_database
 from .storage import StorageStop
+from . import lifecycle
 
 CONTROL_BYTES=1024*1024
 MAX_ATTEMPTS=160
@@ -41,23 +42,32 @@ class RecoveryStop(RuntimeError):pass
 @dataclass(frozen=True)
 class Plan:
     config: CatalogueConfig
-    session_day: str
-    deadline_ms: int
+    session_day: str | None
+    deadline_ms: int | None
     phase_seconds: int=1200
     archive_dir: str | None=None
+    continuous: bool=False
 
     def __post_init__(self):
         cfg=self.config
         if not isinstance(cfg,CatalogueConfig):raise ValueError('RECOVERY_CATALOGUE_ONLY')
         if cfg.city not in cfg.cities:raise ValueError('RECOVERY_REGION_CITY')
-        day=datetime.strptime(self.session_day,'%Y-%m-%d')
-        if type(self.deadline_ms) is not int or type(self.phase_seconds) is not int or not 1<=self.phase_seconds<=1200:raise ValueError('RECOVERY_PLAN_BOUND')
-        ends=[int((day+timedelta(days=1)).replace(tzinfo=ZoneInfo(v[2])).timestamp()*1000) for v in cfg.cities.values()]
-        if self.deadline_ms>max(ends) or self.deadline_ms<=min(ends)-26*3600000:raise ValueError('RECOVERY_SESSION_DEADLINE')
+        if type(self.continuous) is not bool or type(self.phase_seconds) is not int or not 1<=self.phase_seconds<=1200:raise ValueError('RECOVERY_PLAN_BOUND')
+        if self.continuous:
+            if self.session_day is not None or cfg.date is not None:raise ValueError('RECOVERY_ROLLING_DATE_REQUIRED')
+            if self.deadline_ms is not None and type(self.deadline_ms) is not int:raise ValueError('RECOVERY_PLAN_BOUND')
+        else:
+            day=datetime.strptime(self.session_day,'%Y-%m-%d')
+            if type(self.deadline_ms) is not int:raise ValueError('RECOVERY_PLAN_BOUND')
+            ends=[int((day+timedelta(days=1)).replace(tzinfo=ZoneInfo(v[2])).timestamp()*1000) for v in cfg.cities.values()]
+            if self.deadline_ms>max(ends) or self.deadline_ms<=min(ends)-26*3600000:raise ValueError('RECOVERY_SESSION_DEADLINE')
         if cfg.date not in (None,self.session_day):raise ValueError('RECOVERY_DATE_DRIFT')
         if not Path(cfg.data_dir).is_absolute() or self.archive_dir is not None and not Path(self.archive_dir).is_absolute():raise ValueError('RECOVERY_ABSOLUTE_PATHS')
 
-    def value(self):return dict(config=asdict(self.config),session_day=self.session_day,deadline_ms=self.deadline_ms,phase_seconds=self.phase_seconds,archive_dir=self.archive_dir)
+    def value(self):
+        value=dict(config=asdict(self.config),session_day=self.session_day,deadline_ms=self.deadline_ms,phase_seconds=self.phase_seconds,archive_dir=self.archive_dir)
+        if self.continuous:value['continuous']=True  # Preserve every old finite plan/hash.
+        return value
 
     @classmethod
     def load(cls,value):
@@ -91,7 +101,7 @@ def write(root,name,value):
 
 
 @contextmanager
-def owned_control(root,data):
+def owned_control(root,data,*,with_fd=False):
     root=Path(root);data=Path(data)
     if root.is_symlink():raise RecoveryStop('RECOVERY_SYMLINK')
     root=root.resolve();data=data.resolve()
@@ -108,7 +118,7 @@ def owned_control(root,data):
     lock=root/'.controller.lock'
     with lock.open('a') as f:
         os.chmod(lock,0o600);fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)
-        yield root
+        yield (root,f.fileno()) if with_fd else root
 
 
 def preflight(plan):
@@ -159,14 +169,16 @@ def prepare_resume(store,identity,at):
 
 
 class Progress:
-    def __init__(self,root,nonce):self.root=root;self.nonce=nonce;self.last=-float('inf');self.stage=None;self.delivery={}
+    def __init__(self,root,nonce):self.root=root;self.nonce=nonce;self.last=-float('inf');self.stage=None;self.delivery={};self.observed={}
+    def observation(self,value):
+        self.observed=dict(observation=value);self.last=-float('inf');self(self.stage or 'STARTING')
     def sender_status(self,value):
         self.delivery=dict(value);self.last=-float('inf');self(self.stage or 'STARTING')
     def __call__(self,stage):
         if stage not in STAGE_TIMEOUT:raise RecoveryStop('RECOVERY_PROGRESS_STAGE')
         mono=time.monotonic()
         if mono-self.last<1 and stage==self.stage:return
-        try:write(self.root,self.nonce+'.progress.json',dict(nonce=self.nonce,pid=os.getpid(),stage=stage,monotonic=mono,at_ms=time.time_ns()//1000000,**self.delivery))
+        try:write(self.root,self.nonce+'.progress.json',dict(nonce=self.nonce,pid=os.getpid(),stage=stage,monotonic=mono,at_ms=time.time_ns()//1000000,**self.delivery,**self.observed))
         except OSError:raise RecoveryStop('RECOVERY_PROGRESS_WRITE') from None
         self.last=mono;self.stage=stage
 
@@ -200,21 +212,22 @@ def frozen_discover(plan,city):
     return markets,receipt,skipped
 
 
-def worker(root,nonce,token):
+def worker(root,nonce,token,guard_fd=None):
     saved=json.loads((root/'plan.json').read_text());plan=Plan.load(saved['plan'])
     if saved['code']!=code_identity():raise RecoveryStop('RECOVERY_CODE_DRIFT')
+    if plan.continuous:lifecycle.claim_child(root,nonce,guard_fd,saved,write)
     stop=threading.Event()
     for sig in (signal.SIGTERM,signal.SIGINT):signal.signal(sig,lambda *_:stop.set())
-    timer=threading.Timer(max(0,(plan.deadline_ms-time.time_ns()//1000000)/1000),stop.set)
-    timer.daemon=True;timer.start()
+    timer=threading.Timer(max(0,(plan.deadline_ms-time.time_ns()//1000000)/1000),stop.set) if plan.deadline_ms is not None else None
+    if timer:timer.daemon=True;timer.start()
     progress=Progress(root,nonce);progress('STARTING');outcome='FATAL'
     delivery=dict(telegram_enabled=plan.config.telegram_enabled,telegram_disabled_reason=None if plan.config.telegram_enabled else 'NOT_ENABLED_IN_PLAN')
     try:
-        remaining=(plan.deadline_ms-time.time_ns()//1000000)//1000
+        remaining=plan.phase_seconds if plan.deadline_ms is None else (plan.deadline_ms-time.time_ns()//1000000)//1000
         if remaining<1:outcome='DEADLINE'
         else:
             checkpoint(plan,progress)
-            remaining=(plan.deadline_ms-time.time_ns()//1000000)//1000
+            remaining=plan.phase_seconds if plan.deadline_ms is None else (plan.deadline_ms-time.time_ns()//1000000)//1000
             if remaining<1 or stop.is_set():outcome='SIGNAL_STOP' if stop.is_set() else 'DEADLINE'
             else:
                 cfg=replace(plan.config,duration_seconds=min(plan.phase_seconds,int(remaining)))
@@ -227,7 +240,7 @@ def worker(root,nonce,token):
                     progress.sender_status(delivery)
                 sender_status(dict(telegram_enabled=cfg.telegram_enabled,telegram_disabled_reason='PREVIOUS_SEND_UNCONFIRMED' if disabled else delivery['telegram_disabled_reason']))
                 result=observe_catalogue(cfg,token=token if cfg.telegram_enabled else None,stop=stop,
-                    discover=lambda city:frozen_discover(plan,city),progress=progress,session_day=plan.session_day,
+                    discover=discover_city if plan.continuous else lambda city:frozen_discover(plan,city),progress=progress,session_day=plan.session_day,
                     on_sender_status=sender_status)
                 outcome=result['state']
     except Exception as exc:
@@ -235,44 +248,56 @@ def worker(root,nonce,token):
         error=type(exc).__name__
         reason=str(exc) if re.fullmatch(r'[A-Z][A-Z0-9_:.+-]{0,96}',str(exc)) else None
     else:error=None;reason=None
-    timer.cancel()
+    if timer:timer.cancel()
     write(root,nonce+'.result.json',dict(nonce=nonce,pid=os.getpid(),state=outcome,error=error,reason=reason,at_ms=time.time_ns()//1000000,**delivery))
 
 
-def spawn(root,nonce,token):
+def spawn(root,nonce,token,guard_fd=None):
     env={'PATH':os.defpath,'LANG':'C.UTF-8','PYTHONDONTWRITEBYTECODE':'1','PYTHONNOUSERSITE':'1','PYTHONPATH':os.pathsep.join(sys.path)}
-    child=subprocess.Popen([sys.executable,'-B','-m','holy_weather.recovery','worker',str(root),nonce],
+    args=[sys.executable,'-B','-m','holy_weather.recovery','worker',str(root),nonce]
+    if guard_fd is not None:args+=['--guard-fd',str(guard_fd)]
+    child=subprocess.Popen(args,pass_fds=() if guard_fd is None else (guard_fd,),
         stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,text=True,env=env,close_fds=True)
     return child
 
 
 def supervise(plan,control_dir,*,token=None,stop=None,clock=None,monotonic=time.monotonic,wait=None,_spawn=spawn):
-    """Finite controller; graceful stop only. No kill, boot install or old PID adoption."""
+    """Graceful stop only. Continuous recovery additionally proves Linux ownership."""
     if plan.config.telegram_enabled and (not isinstance(token,str) or not re.fullmatch(r'\d+:[A-Za-z0-9_-]{20,}',token)):raise RecoveryStop('RECOVERY_EXPLICIT_TOKEN')
     default_wait=wait is None
     stop=stop or threading.Event();clock=clock or (lambda:time.time_ns()//1000000);wait=wait or stop.wait
-    with owned_control(control_dir,plan.config.data_dir) as root:
+    with owned_control(control_dir,plan.config.data_dir,with_fd=True) as (root,guard_fd):
+        if (root/'transition.json').exists():raise RecoveryStop('RECOVERY_UNFINISHED_TRANSITION')
         if plan.archive_dir:
             archive=Path(plan.archive_dir).resolve()
             if archive==root or root in archive.parents or archive in root.parents:raise RecoveryStop('RECOVERY_CONTROL_ARCHIVE_OVERLAP')
         code=code_identity();identity=dict(control=str(root),plan=sha(plan.value()),code=code)
         state_path=root/'state.json';saved_plan=dict(plan=plan.value(),code=code,identity=identity)
-        if state_path.exists():
-            state=json.loads(state_path.read_text())
-            if state['identity']!=identity:raise RecoveryStop('RECOVERY_IDENTITY_DRIFT')
-            if state.get('active'):
+        state=json.loads(state_path.read_text()) if state_path.exists() else None
+        if state is not None and state['identity']!=identity:raise RecoveryStop('RECOVERY_IDENTITY_DRIFT')
+        # Refuse corrupted configuration before reconciliation can change owner,
+        # charge a recovery, or retire already committed audit files.
+        if (root/'plan.json').exists() and canonical(json.loads((root/'plan.json').read_text()))!=canonical(saved_plan):raise RecoveryStop('RECOVERY_PLAN_DRIFT')
+        if state is not None:
+            if plan.continuous:
+                state=lifecycle.finish_rotation(root,plan,state,write)
+                if not lifecycle.reconcile(root,state,clock(),write,lambda:preflight(plan)):
+                    write(root,'state.json',state);return state
+            elif state.get('active'):
                 # The previous controller may have died during launch/write.
                 # Never guess a missing PID or attach to an unowned process.
                 raise RecoveryStop('RECOVERY_PREVIOUS_ATTEMPT_UNRESOLVED')
-            if not state.get('retry') and state['status'] not in ('COMPLETED_WINDOW','PREPARING'):return state
+            if not plan.continuous and not state.get('retry') and state['status'] not in ('COMPLETED_WINDOW','PREPARING'):return state
         else:state=dict(identity=identity,attempts=[],restarts=[],last_ms=clock(),active=None,status='PREPARING')
-        if (root/'plan.json').exists() and canonical(json.loads((root/'plan.json').read_text()))!=canonical(saved_plan):raise RecoveryStop('RECOVERY_PLAN_DRIFT')
+        if plan.continuous:
+            state['controller_process']=lifecycle.own_identity()
+            state=lifecycle.compact_control(root,plan,state,write,clock())
         write(root,'plan.json',saved_plan)
-        mono_deadline=monotonic()+max(0,(plan.deadline_ms-clock())/1000)
+        mono_deadline=float('inf') if plan.deadline_ms is None else monotonic()+max(0,(plan.deadline_ms-clock())/1000)
         retry=bool(state.get('retry'));child=None
         def save(status):
             state.update(status=status,last_ms=clock());write(root,'state.json',state)
-        def ended():return stop.is_set() or clock()>=plan.deadline_ms or monotonic()>=mono_deadline
+        def ended():return stop.is_set() or plan.deadline_ms is not None and clock()>=plan.deadline_ms or monotonic()>=mono_deadline
         def sender_status(value):
             if 'telegram_enabled' not in value:return
             enabled=value['telegram_enabled'];reason=value.get('telegram_disabled_reason')
@@ -283,10 +308,13 @@ def supervise(plan,control_dir,*,token=None,stop=None,clock=None,monotonic=time.
             while not ended():
                 now=clock()
                 if now<state['last_ms']:raise RecoveryStop('RECOVERY_CLOCK_REVERSED')
+                if plan.continuous:state=lifecycle.compact_control(root,plan,state,write,now)
                 if len(state['attempts'])>=MAX_ATTEMPTS:state['retry']=False;save('ATTEMPT_LIMIT');break
                 if retry:
                     recent=[t for t in state['restarts'] if now-t<86400000]
-                    if len(recent)>=6 or sum(now-t<3600000 for t in recent)>=3:state['retry']=False;save('RESTART_BUDGET_EXHAUSTED');break
+                    if plan.continuous:
+                        if not state.get('recovery_charged') and not lifecycle.charge(state,now):save(state['status']);break
+                    elif len(recent)>=6 or sum(now-t<3600000 for t in recent)>=3:state['retry']=False;save('RESTART_BUDGET_EXHAUSTED');break
                     next_ms=state.get('next_ms',now+min(BACKOFF_SECONDS*2**len(recent),300)*1000)
                     state.update(retry=True,next_ms=next_ms);save('BACKOFF')
                     while clock()<next_ms and not ended():
@@ -298,13 +326,18 @@ def supervise(plan,control_dir,*,token=None,stop=None,clock=None,monotonic=time.
                 if ended():state['retry']=False;break
                 if binding is not None and binding!=identity:raise RecoveryStop('RECOVERY_CONTROL_BINDING')
                 nonce=uuid.uuid4().hex;entry=dict(nonce=nonce,at_ms=clock(),recovery=retry)
-                if retry:state['restarts'].append(clock())
-                state['attempts'].append(entry);state['active']=nonce;state.pop('next_ms',None);save('STARTING')
+                if plan.continuous:entry['guard_protocol']=lifecycle.PROTOCOL
+                elif retry:state['restarts'].append(clock())
+                state['attempts'].append(entry);state['active']=nonce;state.pop('next_ms',None)
+                # The paid recovery belongs to this durable launch intent. Keep
+                # it through BACKOFF, but never let an interrupted spawn reuse it.
+                state.pop('recovery_charged',None);save('STARTING')
                 if ended():
                     entry.update(state='CANCELLED_BEFORE_SPAWN',finished_ms=clock());state.update(active=None,retry=False)
-                    if retry:state['restarts'].pop()
+                    if retry and not plan.continuous:state['restarts'].pop()
                     break
-                child=_spawn(root,nonce,token);entry['pid']=child.pid;save('RUNNING')
+                child=_spawn(root,nonce,token,guard_fd) if plan.continuous else _spawn(root,nonce,token)
+                entry['pid']=child.pid;save('RUNNING')
                 child.stdin.write((token or '')+'\n');child.stdin.flush();child.stdin.close()
                 started=monotonic();requested=None;requested_at=None;progress=None
                 while child.poll() is None:
@@ -312,6 +345,8 @@ def supervise(plan,control_dir,*,token=None,stop=None,clock=None,monotonic=time.
                     if progress and (progress['nonce']!=nonce or progress['pid']!=child.pid or progress['stage'] not in STAGE_TIMEOUT):raise RecoveryStop('RECOVERY_PROGRESS_IDENTITY')
                     if progress and (type(progress['monotonic']) not in (int,float) or not math.isfinite(progress['monotonic']) or progress['monotonic']>monotonic()+.1):raise RecoveryStop('RECOVERY_PROGRESS_CLOCK')
                     if progress:sender_status(progress)
+                    if progress and progress.get('observation')!=state.get('observation'):
+                        state['observation']=progress.get('observation');save(state['status'])
                     age=monotonic()-(progress['monotonic'] if progress else started)
                     limit=STAGE_TIMEOUT[progress['stage']] if progress else STAGE_TIMEOUT['STARTING']
                     if not requested and (ended() or age>limit):
@@ -339,7 +374,9 @@ def supervise(plan,control_dir,*,token=None,stop=None,clock=None,monotonic=time.
                 entry.update(state=outcome,returncode=returncode,finished_ms=clock(),error=result.get('error') if result else None,reason=result.get('reason') if result else None);state.update(active=None,retry=retry)
                 child=None;save(outcome)
                 if requested=='STOP':break
-                if outcome=='COMPLETED_WINDOW':continue
+                if outcome=='COMPLETED_WINDOW' or plan.continuous and outcome in ('NO_VERIFIED_CURRENT_MARKETS','ALL_MARKETS_CLOSED_OR_LOCAL_DATE_ENDED'):
+                    if plan.continuous and outcome!='COMPLETED_WINDOW':wait(min(30,max(0,mono_deadline-monotonic())))
+                    continue
                 if not retry:break
             if ended():save('STOPPED' if stop.is_set() else 'DEADLINE')
             return state
@@ -354,11 +391,11 @@ def main():
     os.umask(0o077);resource.setrlimit(resource.RLIMIT_CORE,(0,0))
     p=argparse.ArgumentParser();sub=p.add_subparsers(dest='command',required=True)
     a=sub.add_parser('run');a.add_argument('--plan',required=True);a.add_argument('--control-dir',required=True)
-    a=sub.add_parser('worker');a.add_argument('control_dir');a.add_argument('nonce')
+    a=sub.add_parser('worker');a.add_argument('control_dir');a.add_argument('nonce');a.add_argument('--guard-fd',type=int)
     args=p.parse_args()
     if args.command=='worker':
         if not re.fullmatch('[0-9a-f]{32}',args.nonce):raise RecoveryStop('RECOVERY_NONCE')
-        worker(Path(args.control_dir),args.nonce,sys.stdin.readline(4096).strip() or None)
+        worker(Path(args.control_dir),args.nonce,sys.stdin.readline(4096).strip() or None,args.guard_fd)
         return 0
     else:
         plan=Plan.load(json.loads(Path(args.plan).read_text()));stop=threading.Event()

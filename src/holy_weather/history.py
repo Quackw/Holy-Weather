@@ -8,6 +8,8 @@ import base64
 import fcntl
 import gzip
 import hashlib
+import heapq
+from itertools import zip_longest
 import json
 import os
 from pathlib import Path
@@ -120,6 +122,29 @@ def fingerprint(c):
     return result
 
 
+def verify_seen_projection(candidate,source):
+    """Prove exact coverage against the source, not merely valid shard encoding.
+
+    candidate has the source attached as original. Two packed indexes are bounded
+    by 96MiB each; removed identities stream through SQLite's existing index.
+    No Python set of the full history and no new persistent table is created.
+    """
+    before=Seen(source);after=Seen(candidate)
+    def packed(index):
+        for prefix in sorted(index.buckets):
+            raw=index.buckets[prefix]
+            for offset in range(0,len(raw),32):yield raw[offset:offset+32]
+    removed=(bytes.fromhex(row[0]) for row in candidate.execute(
+        'select identity from original.inputs where id not in (select id from main.inputs) order by identity'))
+    def expected():
+        previous=None
+        for identity in heapq.merge(packed(before),removed):
+            if identity!=previous:yield identity
+            previous=identity
+    for actual,wanted in zip_longest(packed(after),expected()):
+        if actual!=wanted:raise ValueError('HISTORY_INDEX_COVERAGE')
+
+
 def unpack(archive,destination,expected):
     path=Path(destination)
     if path.exists() or path.is_symlink():raise ValueError('HISTORY_DEST_EXISTS')
@@ -204,11 +229,12 @@ def prepare(data_dir,destination,*,expected_sha,cutoff_ms=None):
                     c.execute('insert into '+table+'('+columns+') select '+columns+' from original.'+table+where+' order by rowid')
                 identities=(x[0] for x in c.execute('select identity from original.inputs where id not in keep_inputs').fetchall())
                 seen.add(c,identities)
+                del seen
                 manifest=dict(version=1,source_sha256=expected_sha,snapshot_sha256=snapshot_sha,backup_api_sha256=backup_sha,archive_sha256=digest(archive),cutoff_ms=cutoff,
                     removed_inputs=removed,removed_research_events=old['events']['rows']-c.execute('select count(*) from events').fetchone()[0],
                     source_fingerprint=old,archive='history.sqlite3.gz',schema=1)
                 c.execute('insert into meta values(?,?)',(PART+snapshot_sha,canonical({k:v for k,v in manifest.items() if k!='source_fingerprint'})))
-                c.execute('commit');check(c);Seen(c)
+                c.execute('commit');check(c);verify_seen_projection(c,a)
                 for table in TABLES:
                     if table in ('inputs','samples','events','event_inputs'):
                         # Selected immutable rows must be byte-identical to source.
@@ -223,7 +249,7 @@ def prepare(data_dir,destination,*,expected_sha,cutoff_ms=None):
             if not manifest['source_unchanged']:raise ValueError('HISTORY_SOURCE_CHANGED')
             (dest/'MANIFEST.json').write_text(canonical(manifest)+'\n');os.chmod(dest/'MANIFEST.json',0o600)
             for p in (candidate,archive,dest/'MANIFEST.json'):sync_file(p)
-            sync_dir(dest)
+            sync_dir(dest);sync_dir(dest.parent)
             return manifest
         finally:a.close()
 
@@ -251,6 +277,14 @@ def _restore_history(active_db,part,destination):
     if wal.exists() and wal.stat().st_size:raise ValueError('HISTORY_NONEMPTY_WAL')
     m=json.loads((part/'MANIFEST.json').read_text());archive=part/'history.sqlite3.gz'
     if digest(archive)!=m['archive_sha256']:raise ValueError('HISTORY_ARCHIVE_SHA')
+    a=sqlite3.connect(active.as_uri()+'?mode=ro&immutable=1',uri=True)
+    try:
+        check(a)
+        row=a.execute('select value from meta where key=?',(PART+m['snapshot_sha256'],)).fetchone()
+        ref=json.loads(row[0]) if row else {}
+        if digest(active)!=m['source_sha256'] and any(ref.get(k)!=m.get(k) for k in ('source_sha256','snapshot_sha256','archive_sha256','schema')):
+            raise ValueError('HISTORY_RESTORE_LINEAGE')
+    finally:a.close()
     dest.mkdir(mode=0o700);unpack(archive,dest/'archived.sqlite3',m['snapshot_sha256'])
     a=sqlite3.connect(active.as_uri()+'?mode=ro&immutable=1',uri=True);c=sqlite3.connect(dest/'restored.sqlite3');a.backup(c);a.close()
     try:
@@ -258,9 +292,8 @@ def _restore_history(active_db,part,destination):
         # State and delivery receipts are from the new active DB, never the past.
         for table,pk in [('inputs','id'),('samples','input_id'),('events','id')]:
             names=[x[1] for x in c.execute('pragma table_info('+table+')')]
-            if table in ('inputs','samples'):
-                changed=' or '.join('a.'+n+' is not b.'+n for n in names)
-                if c.execute('select 1 from '+table+' a join old.'+table+' b on a.'+pk+'=b.'+pk+' where '+changed+' limit 1').fetchone():raise ValueError('HISTORY_RESTORE_CONFLICT')
+            changed=' or '.join('a.'+n+' is not b.'+n for n in names)
+            if c.execute('select 1 from '+table+' a join old.'+table+' b on a.'+pk+'=b.'+pk+' where '+changed+' limit 1').fetchone():raise ValueError('HISTORY_RESTORE_CONFLICT')
             c.execute('insert into '+table+' select * from old.'+table+' where '+pk+' not in (select '+pk+' from '+table+')')
         c.execute('insert or ignore into event_inputs select * from old.event_inputs');c.commit();check(c)
         result=fingerprint(c)
@@ -299,15 +332,20 @@ def adopt(data_dir,part,*,cleanup=False):
         if digest(db)!=m['source_sha256'] or digest(candidate)!=m['candidate_sha256']:raise ValueError('HISTORY_ADOPT_DRIFT')
         if digest(part/'history.sqlite3.gz')!=m['archive_sha256']:raise ValueError('HISTORY_ARCHIVE_SHA')
         c=sqlite3.connect(candidate.as_uri()+'?mode=ro&immutable=1',uri=True)
-        try:check(c);Seen(c)
-        finally:c.close()
+        a=sqlite3.connect(db.as_uri()+'?mode=ro&immutable=1',uri=True)
+        try:
+            check(c);check(a)
+            c.execute('attach database ? as original',(db.as_uri()+'?mode=ro&immutable=1',))
+            verify_seen_projection(c,a)
+            if fingerprint(c)!=m['candidate_fingerprint']:raise ValueError('HISTORY_CANDIDATE_FINGERPRINT')
+        finally:c.close();a.close()
         # Leave the same reserve as the writer, without changing its 256MiB cap.
         if candidate.stat().st_size+1024*1024>=MAX_SNAPSHOT_BYTES-8*1024*1024:raise ValueError('HISTORY_NO_HEADROOM')
         intent=dict(source_sha256=m['source_sha256'],candidate_sha256=m['candidate_sha256'])
         with (part/'ADOPT_INTENT.json').open('x') as f:f.write(canonical(intent))
         os.chmod(part/'ADOPT_INTENT.json',0o600)
         for p in (candidate,part/'history.sqlite3.gz',part/'MANIFEST.json',part/'ADOPT_INTENT.json'):sync_file(p)
-        sync_dir(part)
+        sync_dir(part);sync_dir(part.parent)
         os.replace(candidate,db)
         sync_dir(data);sync_dir(part)
         if digest(db)!=m['candidate_sha256']:raise ValueError('HISTORY_ADOPT_UNKNOWN')
