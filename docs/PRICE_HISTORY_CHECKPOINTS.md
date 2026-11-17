@@ -47,6 +47,12 @@ restore-proof files after their SHA/ownership checks; archives/manifests remain.
 It never controls a process. Deployment/maintenance requires separate exact approval.
 
 `restore_history` works only in a new isolated destination with closed input DBs.
+An owned source must have its existing, non-symlink writer lock. Restoration
+acquires that lock exclusively before checking WAL or creating output, and holds
+it until the operation returns or fails. An empty WAL alone is not proof that
+the observer stopped. A busy/missing/invalid owned-source lock refuses without
+creating a destination or changing the source. Closed archive candidates and
+isolated inverse files without a runtime owner remain compatible.
 It restores archived inputs, samples, research events and evidence into a copy of
 the current DB while retaining current state, fired levels, queue and new records.
 Conflicting IDs/identities stop restoration. Multiple parts can be applied newest

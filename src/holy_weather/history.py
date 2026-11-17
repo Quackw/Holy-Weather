@@ -230,6 +230,21 @@ def prepare(data_dir,destination,*,expected_sha,cutoff_ms=None):
 
 def restore_history(active_db,part,destination):
     """Isolated proof/inverse only: never adopt or rewind state/queue/new records."""
+    active=Path(active_db).absolute();lock=active.parent/'.writer.lock'
+    # A zero-byte WAL does not prove the owner has stopped. Use the same lock
+    # as Store and hold it through the complete inverse, including failure.
+    if lock.is_symlink():raise ValueError('HISTORY_RESTORE_WRITER_LOCK')
+    if lock.exists() or (active.parent/'.holy-weather-owned').exists():
+        if not lock.is_file():raise ValueError('HISTORY_RESTORE_WRITER_LOCK')
+        with lock.open('rb') as held:
+            fcntl.flock(held,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            return _restore_history(active,part,destination)
+    # Prepared archive candidates and isolated inverse files have no runtime
+    # owner/lock; preserve the existing closed-artifact restore path.
+    return _restore_history(active,part,destination)
+
+
+def _restore_history(active_db,part,destination):
     active=Path(active_db).absolute();part=Path(part).absolute();dest=Path(destination).absolute()
     if dest.exists() or active.is_symlink() or part.is_symlink():raise ValueError('HISTORY_RESTORE_DEST')
     wal=active.with_name(active.name+'-wal')
