@@ -485,6 +485,7 @@ class Store:
     def close(self):
         if not self.closed:
             self.c.execute('pragma wal_checkpoint(truncate)')
+            self.history_seen.close()
             self.c.close(); self.lock.close(); self.closed = True
 
     def __enter__(self):

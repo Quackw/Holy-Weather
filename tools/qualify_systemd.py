@@ -67,7 +67,7 @@ def main():
     encrypted=base/'telegram.encrypted'
     command('/usr/bin/systemd-creds','encrypt','--with-key=host','--name=telegram','-',str(encrypted),input='123456:'+'offline_test_only_'*3)
     template=(root/'deploy/holy-weather-price@.service.in').read_text()
-    unit=template.replace('@RELEASE@',str(base)).replace('User=polymeteo-agent','User=root')
+    unit=template.replace('@RELEASE@',str(base)).replace('@HISTORY_PATHS@','').replace('User=polymeteo-agent','User=root')
     unit=unit.replace('WorkingDirectory='+str(base),'WorkingDirectory='+str(root))
     unit=unit.replace(str(base)+'/venv/bin/python -B -m holy_weather.service',sys.executable+' -B '+str(probe))
     unit=unit.replace('/etc/holy-weather/%i.json',str(base/'plan.json')).replace('/var/lib/holy-weather/%i/control',str(base/'control'))

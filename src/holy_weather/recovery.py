@@ -25,6 +25,7 @@ from zoneinfo import ZoneInfo
 from .catalogue import CatalogueConfig,CatalogueStore,discover_city,observe_catalogue
 from .core import canonical,sha
 from .history import Seen,check as check_database
+from .history_files import HistoryStorage,offload,payload,FILE_INDEX
 from .storage import StorageStop
 from . import lifecycle
 
@@ -49,6 +50,7 @@ class Plan:
     phase_seconds: int=1200
     archive_dir: str | None=None
     continuous: bool=False
+    history_storage: HistoryStorage | None=None
 
     def __post_init__(self):
         cfg=self.config
@@ -65,15 +67,23 @@ class Plan:
             if self.deadline_ms>max(ends) or self.deadline_ms<=min(ends)-26*3600000:raise ValueError('RECOVERY_SESSION_DEADLINE')
         if cfg.date not in (None,self.session_day):raise ValueError('RECOVERY_DATE_DRIFT')
         if not Path(cfg.data_dir).is_absolute() or self.archive_dir is not None and not Path(self.archive_dir).is_absolute():raise ValueError('RECOVERY_ABSOLUTE_PATHS')
+        if self.history_storage is not None:
+            if not self.continuous or self.archive_dir is None or not isinstance(self.history_storage,HistoryStorage):
+                raise ValueError('RECOVERY_HISTORY_STORAGE_REQUIRES_CONTINUOUS')
+            cold=Path(self.history_storage.directory);data=Path(cfg.data_dir);archive=Path(self.archive_dir)
+            if cold in (data,archive) or cold in data.parents or data in cold.parents or cold in archive.parents or archive in cold.parents:
+                raise ValueError('RECOVERY_HISTORY_STORAGE_OVERLAP')
 
     def value(self):
         value=dict(config=asdict(self.config),session_day=self.session_day,deadline_ms=self.deadline_ms,phase_seconds=self.phase_seconds,archive_dir=self.archive_dir)
         if self.continuous:value['continuous']=True  # Preserve every old finite plan/hash.
+        if self.history_storage is not None:value['history_storage']=self.history_storage.value()
         return value
 
     @classmethod
     def load(cls,value):
         value=dict(value);cfg=dict(value.pop('config'));cfg['levels']=tuple(cfg.get('levels',('0.50','0.70','0.90')))
+        if value.get('history_storage') is not None:value['history_storage']=HistoryStorage(**value['history_storage'])
         return cls(config=CatalogueConfig(**cfg),**value)
 
 
@@ -140,7 +150,10 @@ def preflight(plan):
                 for p in part.iterdir():private(p)
                 m=json.loads((part/'MANIFEST.json').read_text())
                 from .history import digest
-                if digest(part/'history.sqlite3.gz')!=m['archive_sha256']:raise RecoveryStop('RECOVERY_ARCHIVE_DRIFT')
+                # Mirroring is verified before a local payload can retire. An
+                # unavailable history disk uses the spool; live state stays local.
+                if plan.history_storage and (part/'MIRRORED.json').is_file():continue
+                if digest(payload(part,'history.sqlite3.gz'))!=m['archive_sha256']:raise RecoveryStop('RECOVERY_ARCHIVE_DRIFT')
     with lock.open('rb') as f:
         fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)
         c=sqlite3.connect(db.as_uri()+'?mode=ro',uri=True,timeout=1)
@@ -171,7 +184,10 @@ def prepare_resume(store,identity,at):
 
 
 class Progress:
-    def __init__(self,root,nonce):self.root=root;self.nonce=nonce;self.last=-float('inf');self.stage=None;self.delivery={};self.observed={}
+    def __init__(self,root,nonce):self.root=root;self.nonce=nonce;self.last=-float('inf');self.stage=None;self.delivery={};self.observed={};self.storage={}
+    def storage_status(self,value):
+        self.storage={'storage':value};self.last=-float('inf');self(self.stage or 'STARTING')
+        print(canonical({'kind':'HISTORY_STORAGE','status':value['status'],'reason':value.get('reason')}),flush=True)
     def observation(self,value):
         self.observed=dict(observation=value);self.last=-float('inf');self(self.stage or 'STARTING')
     def sender_status(self,value):
@@ -180,7 +196,7 @@ class Progress:
         if stage not in STAGE_TIMEOUT:raise RecoveryStop('RECOVERY_PROGRESS_STAGE')
         mono=time.monotonic()
         if mono-self.last<1 and stage==self.stage:return
-        try:write(self.root,self.nonce+'.progress.json',dict(nonce=self.nonce,pid=os.getpid(),stage=stage,monotonic=mono,at_ms=time.time_ns()//1000000,**self.delivery,**self.observed))
+        try:write(self.root,self.nonce+'.progress.json',dict(nonce=self.nonce,pid=os.getpid(),stage=stage,monotonic=mono,at_ms=time.time_ns()//1000000,**self.delivery,**self.observed,**self.storage))
         except OSError:raise RecoveryStop('RECOVERY_PROGRESS_WRITE') from None
         self.last=mono;self.stage=stage
 
@@ -190,19 +206,44 @@ def checkpoint(plan,progress):
     if plan.archive_dir is None:return
     from .history import prepare,adopt,digest
     data=Path(plan.config.data_dir);db=data/'monitor.sqlite3'
-    if db.stat().st_size<ARCHIVE_TRIGGER_BYTES:return
+    if db.stat().st_size<ARCHIVE_TRIGGER_BYTES and not plan.history_storage:return
     progress('ARCHIVE');parts=Path(plan.archive_dir)
     if parts==data or data in parts.parents or parts in data.parents:raise RecoveryStop('RECOVERY_ARCHIVE_DATA_OVERLAP')
     parts.mkdir(mode=0o700,parents=True,exist_ok=True);private(parts,True)
     files=list(parts.rglob('*'))
     for p in files:private(p,p.is_dir())
     count=len(list(parts.glob('part-*')));need=5*db.stat().st_size+128*1024*1024
-    if count>=40 or sum(p.stat().st_size for p in files if p.is_file())+need>4*1024**3:raise RecoveryStop('RECOVERY_ARCHIVE_BUDGET')
+    budget=4*1024**3
+    if plan.history_storage:
+        with sqlite3.connect(db.as_uri()+'?mode=ro',uri=True) as c:
+            ref=c.execute('select value from meta where key=?',(FILE_INDEX,)).fetchone()
+        keep=() if ref is None else (Path(json.loads(ref[0])['part']).name,)
+        if ref:need+=json.loads(ref[0])['count']*32
+        report=offload(parts,plan.history_storage,keep=keep)
+        report.update(spool_bytes=sum(p.stat().st_size for p in parts.rglob('*') if p.is_file()),
+                      spool_limit_bytes=plan.history_storage.spool_bytes,history_limit_bytes=plan.history_storage.history_bytes)
+        if report['spool_bytes']>=plan.history_storage.spool_bytes*4//5 or report.get('history_bytes',0)>=plan.history_storage.history_bytes*4//5:
+            report.update(status='PRESSURE',reason='HISTORY_CAPACITY_REVIEW_REQUIRED')
+        if hasattr(progress,'storage_status'):progress.storage_status(report)
+        budget=plan.history_storage.spool_bytes
+        files=list(parts.rglob('*'))
+        if __import__('shutil').disk_usage(data).free<need+plan.history_storage.free_reserve_bytes:
+            raise RecoveryStop('RECOVERY_FREE_SPACE')
+        if db.stat().st_size<ARCHIVE_TRIGGER_BYTES:return
+    if (not plan.history_storage and count>=40) or sum(p.stat().st_size for p in files if p.is_file())+need>budget:
+        raise RecoveryStop('RECOVERY_ARCHIVE_BUDGET')
     # After an abrupt writer exit, let SQLite recover committed WAL under its
     # normal single-writer lock before the explicit closed-writer checkpoint.
     with CatalogueStore(plan.config,session=False):pass
-    part=parts/('part-'+str(count+1).zfill(3))
-    m=prepare(data,part,expected_sha=digest(db),compact_price_inputs=plan.continuous)
+    sequence=max((int(p.name.removeprefix('part-')) for p in parts.glob('part-*')),default=0)+1
+    part=parts/('part-'+str(sequence).zfill(3))
+    options={}
+    if plan.history_storage:
+        options=dict(disk_index=True,retire_at_ms=time.time_ns()//1000000,closed_days=plan.history_storage.closed_days)
+        if hasattr(progress,'root'):
+            control=json.loads((progress.root/'state.json').read_bytes())
+            options['protected_meta_keys']=tuple(control[key] for key in ('audit_tip','transition_ref') if control.get(key))
+    m=prepare(data,part,expected_sha=digest(db),compact_price_inputs=plan.continuous,**options)
     if m['candidate_bytes']>ARCHIVE_CANDIDATE_LIMIT_BYTES:raise RecoveryStop('RECOVERY_ARCHIVE_HEADROOM')
     adopt(data,part,cleanup=True)
 
@@ -244,7 +285,7 @@ def worker(root,nonce,token,guard_fd=None):
                 sender_status(dict(telegram_enabled=cfg.telegram_enabled,telegram_disabled_reason='PREVIOUS_SEND_UNCONFIRMED' if disabled else delivery['telegram_disabled_reason']))
                 result=observe_catalogue(cfg,token=token if cfg.telegram_enabled else None,stop=stop,
                     discover=discover_city if plan.continuous else lambda city:frozen_discover(plan,city),progress=progress,session_day=plan.session_day,
-                    on_sender_status=sender_status)
+                    on_sender_status=sender_status,**({'rotate_bytes':160*1024**2} if plan.history_storage else {}))
                 outcome=result['state']
     except Exception as exc:
         # Exception text can contain private HTTP details. Keep only the class.
@@ -350,6 +391,8 @@ def supervise(plan,control_dir,*,token=None,stop=None,clock=None,monotonic=time.
                     if progress:sender_status(progress)
                     if progress and progress.get('observation')!=state.get('observation'):
                         state['observation']=progress.get('observation');save(state['status'])
+                    if progress and progress.get('storage')!=state.get('storage'):
+                        state['storage']=progress.get('storage');save(state['status'])
                     age=monotonic()-(progress['monotonic'] if progress else started)
                     limit=STAGE_TIMEOUT[progress['stage']] if progress else STAGE_TIMEOUT['STARTING']
                     if not requested and (ended() or age>limit):
