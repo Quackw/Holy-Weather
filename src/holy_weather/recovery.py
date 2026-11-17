@@ -3,7 +3,7 @@
 Closed-worker control audit uses the same writer lock; no parallel writer.
 Source data, fired levels and terminal receipts survive bounded recovery.
 """
-from contextlib import contextmanager
+from contextlib import contextmanager,closing
 from dataclasses import asdict,dataclass,replace
 from datetime import datetime,timedelta,timezone
 import fcntl
@@ -215,7 +215,7 @@ def checkpoint(plan,progress):
     count=len(list(parts.glob('part-*')));need=5*db.stat().st_size+128*1024*1024
     budget=4*1024**3
     if plan.history_storage:
-        with sqlite3.connect(db.as_uri()+'?mode=ro',uri=True) as c:
+        with closing(sqlite3.connect(db.as_uri()+'?mode=ro',uri=True)) as c:
             ref=c.execute('select value from meta where key=?',(FILE_INDEX,)).fetchone()
         keep=() if ref is None else (Path(json.loads(ref[0])['part']).name,)
         if ref:need+=json.loads(ref[0])['count']*32

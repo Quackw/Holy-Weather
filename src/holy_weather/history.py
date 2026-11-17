@@ -17,6 +17,7 @@ import re
 import shutil
 import sqlite3
 import zlib
+from contextlib import closing
 from .core import canonical
 from .history_files import FILE_INDEX,FileIndex,payload,write_index,difference
 from .history_retention import selection,retired_token_hashes
@@ -211,7 +212,7 @@ def prepare(data_dir,destination,*,expected_sha,cutoff_ms=None,compact_price_inp
     if not 0<db.stat().st_size<=MAX_SNAPSHOT_BYTES:raise ValueError('HISTORY_SNAPSHOT_BOUND')
     file_reserve=0
     if disk_index:
-        with sqlite3.connect(db.as_uri()+'?mode=ro',uri=True) as initial:
+        with closing(sqlite3.connect(db.as_uri()+'?mode=ro',uri=True)) as initial:
             ref=initial.execute('select value from meta where key=?',(FILE_INDEX,)).fetchone()
             if ref:file_reserve=json.loads(ref[0])['count']*32
     if shutil.disk_usage(dest.parent).free<5*db.stat().st_size+128*1024*1024+file_reserve:raise ValueError('HISTORY_SPACE')
