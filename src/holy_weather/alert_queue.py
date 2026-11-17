@@ -62,6 +62,52 @@ def batch_card(store,ids,market,at):
     return '\n'.join(lines)
 
 
+def notice_levels(store, value):
+    events=[json.loads(store.c.execute('select payload from events where id=?',(i,)).fetchone()[0])
+            for i in value.get('event_ids',[value['event_id']])]
+    return sorted({t for e in events for t in e['thresholds']},key=Decimal)
+
+
+def delivered_high(store, event, market):
+    """Delivery evidence only; never infer SENT from UNKNOWN or a TEST receipt."""
+    best=None
+    rows=store.c.execute("""select m.key,m.value from meta m join events e
+        on e.id=json_extract(m.value,'$.event_id') where m.key like ?
+        and json_extract(m.value,'$.status')='SENT' and e.type='PRICE_ALERT'
+        and e.token=? and json_extract(e.payload,'$.market_url')=?
+        and json_extract(e.payload,'$.side')=?
+        and json_extract(m.value,'$.target')=?
+        and json_extract(m.value,'$.market_date')=?""",
+        (PREFIX+'%',event['token'],event['market_url'],event['side'],TARGET,market['date']))
+    for key,raw in rows:
+        v=json.loads(raw)
+        # Reconstruct the old exact preview to distinguish pre-upgrade TESTs too.
+        if v.get('test') is True or v.get('preview_sha256')!=preview(store,key)['preview_sha256']:
+            continue
+        levels=v.get('notification_thresholds') or notice_levels(store,v)
+        level=max(levels,key=Decimal)
+        if best is None or Decimal(level)>Decimal(best['threshold']):
+            best=dict(threshold=level,queue_key=key,event_ids=v.get('event_ids',[v['event_id']]),
+                      message_id=v.get('message_id'),completed_ms=v.get('completed_ms'))
+    return best
+
+
+def visible_levels(levels, covered):
+    return [t for t in levels if covered is None or Decimal(t)>Decimal(covered['threshold'])]
+
+
+def notice_html(store, value, market, at):
+    html=batch_card(store,value.get('event_ids',[value['event_id']]),market,at)
+    levels=value['notification_thresholds']
+    html='\n'.join('Crossed: '+' · '.join(num(Decimal(t)*100)+'%' for t in levels)
+                   if line.startswith('Crossed: ') else line for line in html.split('\n'))
+    if 'UNCONFIRMED' in value.get('delivery_notes',{}).values():
+        html+='\nIncludes ask-only · not confirmed by bid'
+    elif value.get('confirmation')=='UNCONFIRMED':
+        html+='\nAsk-only · not confirmed by bid'
+    return html
+
+
 def enqueue(store,event_id,event,market,at):
     """Called in the same transaction as its originating event."""
     row=store.c.execute('select payload from events where id=?',(event_id,)).fetchone()
@@ -69,12 +115,16 @@ def enqueue(store,event_id,event,market,at):
     saved=json.loads(row[0])
     # A previous refusal is final: never backfill it when capacity reappears.
     if 'delivery_admission' in saved:return
-    def admission(status,reason):
-        saved['delivery_admission']=dict(status=status,reason=reason,at_ms=at)
+    def admission(status,reason,**evidence):
+        saved['delivery_admission']=dict(status=status,reason=reason,at_ms=at,**evidence)
         store.c.execute('update events set payload=? where id=?',(canonical(saved),event_id))
     if not store.cfg.alert_queue_enabled:
         admission('NOT_QUEUED','QUEUE_DISABLED');return
     filtered=store.cfg.price_notification_filter and event['type']=='PRICE_ALERT'
+    covered=delivered_high(store,event,market) if filtered else None
+    levels=visible_levels(event['thresholds'],covered) if filtered else None
+    if filtered and not levels:
+        admission('NOT_QUEUED','DELIVERED_HIGHER_LEVEL',covered_by=covered);return
     priority=int(filtered and any(Decimal(t)>=Decimal('0.70') for t in event['thresholds']))
     waiting=filtered and Decimal(event['current']['bid'])<=Decimal(event['previous']['bid'])
     key=PREFIX+sha([TARGET,event['type'],event_id])
@@ -91,7 +141,8 @@ def enqueue(store,event_id,event,market,at):
                 v['event_ids'].append(event_id)
                 v['expires_ms']=min(v['expires_ms'],expires)
                 v['not_before_ms']=min(v['not_before_ms'],max(at,v['expires_ms']-1000))
-                v['html']=batch_card(store,v['event_ids'],market,at)
+                v['notification_thresholds']=visible_levels(notice_levels(store,v),covered)
+                v['html']=notice_html(store,v,market,at)
                 store.c.execute('update meta set value=? where key=?',(canonical(v),row[0]))
                 admission('QUEUED','BATCHED')
                 saved['delivery_admission']['queue_key']=row[0]
@@ -110,13 +161,16 @@ def enqueue(store,event_id,event,market,at):
         batch_ms=store.cfg.price_batch_seconds*1000
         value.update(event_ids=[event_id],side=event['side'],token=event['token'],batch_market=market['url'],batch_until_ms=at+batch_ms,
                      priority=priority,delivery_policy='FAST_HIGH_V1',
+                     notification_thresholds=levels,
                      not_before_ms=at if priority else min(at+batch_ms,max(at,expires-1000)))
+        if covered:value['covered_by']=covered
     if waiting:
         # Retain older experiment configs, but the final delivery policy caps at 8s.
         window_ms=min(store.cfg.price_confirmation_seconds,8)*1000
         value.update(status='WAITING_BID',confirmation_window_ms=window_ms,wait_until_ms=min(at+window_ms,expires),
                      original_bid=event['current']['bid'],original_source_ms=event['current']['source_ms'],
                      thresholds=event['thresholds'],confirmation='WAITING')
+    if filtered:value['html']=notice_html(store,value,market,at)
     store.c.execute('insert into meta values(?,?)',(key,canonical(value)))
     admission('QUEUED','WAITING_BID' if waiting else 'ACCEPTED')
     store.c.execute("delete from meta where key='alert_queue_status'")
@@ -189,8 +243,9 @@ def advance_waits(store,at):
                 if v.get('confirmation'):notes[v['event_id']]=v['confirmation']
                 event=json.loads(store.c.execute('select payload from events where id=?',(a['event_id'],)).fetchone()[0])
                 market=store.market_for_token(event['token'])
-                a['html']=batch_card(store,a['event_ids'],market,at)
-                if 'UNCONFIRMED' in notes.values():a['html']+='\nIncludes ask-only · not confirmed by bid'
+                a['notification_thresholds']=sorted(set(a.get('notification_thresholds',notice_levels(store,a)))|
+                    set(v.get('notification_thresholds',notice_levels(store,v))),key=Decimal)
+                a['html']=notice_html(store,a,market,at)
                 v.update(status='MERGED',queue_key=k,completed_ms=at)
                 store.c.execute('update meta set value=? where key=?',(canonical(a),k))
                 store.c.execute('update meta set value=? where key=?',(canonical(v),key))
@@ -218,6 +273,21 @@ def claim(store,p,at):
         if not p['test'] and (at<v['event_ms'] or at>p['expires_ms'] or today!=v['market_date']):
             v.update(status='EXPIRED',completed_ms=at)
             store.c.execute('update meta set value=? where key=?',(canonical(v),p['key']));return False
+        if not p['test'] and v.get('track')=='PRICE_ALERT' and v.get('delivery_policy')=='FAST_HIGH_V1':
+            event=json.loads(store.c.execute('select payload from events where id=?',(v['event_id'],)).fetchone()[0])
+            market=store.market_for_token(event['token'])
+            covered=delivered_high(store,event,market)
+            levels=visible_levels(notice_levels(store,v),covered)
+            if not levels:
+                v.update(status='REJECTED',reason='DELIVERED_HIGHER_LEVEL',covered_by=covered,completed_ms=at)
+                store.c.execute('update meta set value=? where key=?',(canonical(v),p['key']));return False
+            if levels!=v.get('notification_thresholds'):
+                v.update(notification_thresholds=levels)
+                if covered:v['covered_by']=covered
+                v['html']=notice_html(store,v,market,at)
+                store.c.execute('update meta set value=? where key=?',(canonical(v),p['key']))
+                return False  # Next tick previews the new exact text; never send old text.
+        if v.get('track')=='PRICE_ALERT':v['test']=p['test']
         v.update(status='UNKNOWN',claimed_ms=at,preview_sha256=p['preview_sha256'])
         store.c.execute('update meta set value=? where key=?',(canonical(v),p['key']))
     return True

@@ -64,7 +64,7 @@ def test_old_regular_work_cannot_delay_same_side_high(cfg,market,make_raw):
         assert not claim(s,preview(s,regular[0]),AT+101)
 
 
-def test_high_precedes_ready_regular_but_honors_shared_spacing(cfg,market,make_raw,monkeypatch):
+def test_high_precedes_and_covers_ready_lower_after_ack(cfg,market,make_raw,monkeypatch):
     calls=[];at=[AT+30001]
     monkeypatch.setattr('holy_weather.telegram.millis',lambda:at[0])
     with Store(cfg_on(cfg)) as s:
@@ -75,7 +75,8 @@ def test_high_precedes_ready_regular_but_honors_shared_spacing(cfg,market,make_r
         assert '70%' in calls[0]['html'] and '55%' in calls[0]['html']
         sender.tick(s,at[0]+1);assert len(calls)==1
         at[0]+=3100;sender.tick(s,at[0]);sender.thread.join(1)
-        assert len(calls)==2 and 'Crossed: 50%' in calls[1]['html']
+        assert len(calls)==1
+        assert any(value(s,k).get('reason')=='DELIVERED_HIGHER_LEVEL' for k in keys(s))
         sender.close(s)
 
 
