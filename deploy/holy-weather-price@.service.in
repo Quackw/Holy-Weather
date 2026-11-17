@@ -1,0 +1,40 @@
+[Unit]
+Description=HOLY WEATHER PRICE (%i)
+Wants=network-online.target time-sync.target
+After=network-online.target time-sync.target
+RequiresMountsFor=/var/lib/holy-weather
+StartLimitIntervalSec=1h
+StartLimitBurst=4
+
+[Service]
+Type=exec
+User=polymeteo-agent
+Group=polymeteo-agent
+WorkingDirectory=@RELEASE@
+ExecStart=@RELEASE@/venv/bin/python -B -m holy_weather.service run --plan /etc/holy-weather/%i.json --control-dir /var/lib/holy-weather/%i/control
+ExecStop=@RELEASE@/venv/bin/python -B -m holy_weather.service stop-intent --control-dir /var/lib/holy-weather/%i/control
+LoadCredentialEncrypted=telegram:/etc/credstore.encrypted/holy-weather.telegram
+Environment=PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1
+UMask=0077
+Restart=on-failure
+RestartSec=1s
+RestartPreventExitStatus=78
+KillMode=control-group
+KillSignal=SIGTERM
+SendSIGKILL=no
+TimeoutStopSec=45s
+LimitCORE=0
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ReadWritePaths=/var/lib/holy-weather/%i
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+StandardOutput=journal
+StandardError=journal
+LogRateLimitIntervalSec=1min
+LogRateLimitBurst=8
+
+[Install]
+WantedBy=multi-user.target

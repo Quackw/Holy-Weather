@@ -29,3 +29,6 @@ jobs:
       - run: python -B -m pytest -q --ci-stack-seconds=30 -o faulthandler_timeout=0
         env:
           HOLY_WEATHER_WEBSOCKETS_ROLLBACK_DIR: ${{ runner.temp }}/websockets-17.1
+      - name: Offline systemd, encrypted credential and controller recovery
+        if: matrix.python-version == '3.11'
+        run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_TEMP "$(command -v python)" -B tools/qualify_systemd.py

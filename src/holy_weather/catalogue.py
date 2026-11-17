@@ -10,7 +10,7 @@ import json
 import time
 import zlib
 from zoneinfo import ZoneInfo
-from .core import Config, EUROPE_CITIES, US_CITIES, CITIES, canonical, sha
+from .core import Config, EUROPE_CITIES, US_CITIES, CITIES, canonical, sha, quote_clock_status
 from .storage import Store, StorageStop
 from .app import process
 
@@ -134,6 +134,28 @@ class CatalogueStore(Store):
         row=self.c.execute("select value from meta where key like ? and (json_extract(value,'$.tokens.YES')=? or json_extract(value,'$.tokens.NO')=?) limit 1",(PREFIX+'%',token,token)).fetchone()
         if not row:raise StorageStop('UNKNOWN_CATALOGUE_TOKEN')
         return json.loads(row[0])
+
+    def runtime_status(self,at):
+        """Read-only health: live coalesced quotes differ from PRICE baselines.
+
+        Neither a healthy socket nor an old saved quote proves PRICE readiness.
+        This does not promote samples or change any detector state.
+        """
+        prices={key[len('price_alert_v1:'):]:json.loads(raw).get('previous') for key,raw in
+                self.c.execute("select key,value from meta where key like 'price_alert_v1:%'")}
+        cities={city:dict(contracts=0,fresh_quotes=0,price_ready=0) for city in self.cfg.cities}
+        for condition,m in self.markets.items():
+            if not self.active(condition,at):continue
+            city=next(c for c,v in self.cfg.cities.items() if v[1]==m['station']);v=cities[city];v['contracts']+=1
+            for token in m['tokens'].values():
+                top=self.seen_tops.get(token);previous=prices.get(token)
+                fresh=bool(self.connected and token in self.ready_tokens and top and all(x is not None for x in top['top'])
+                           and quote_clock_status(self.cfg,top['source_ms'],top['received_ms'],at)=='FRESH')
+                ready=bool(fresh and token in self.price_alert_ready and previous and
+                           quote_clock_status(self.cfg,previous['source_ms'],previous['received_ms'],at)=='FRESH')
+                v['fresh_quotes']+=int(fresh);v['price_ready']+=int(ready)
+        sent=self.c.execute("select max(json_extract(value,'$.completed_ms')) from meta where key like 'alert_delivery_v1:%' and json_extract(value,'$.status')='SENT'").fetchone()[0]
+        return dict(observed_ms=at,connected=self.connected,cities=cities,last_sent_ms=sent)
 
     def retire(self, at):
         """Remove ended markets from memory only; never delete audit or dedupe."""
@@ -403,8 +425,12 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
             result['state']='COMPLETED_WINDOW'
             reconnects=0
             telemetry={}
+            next_observation=0
             while not stop.is_set() and monotonic()<deadline:
                 progress('OBSERVING')
+                if monotonic()>=next_observation:
+                    if hasattr(progress,'observation'):progress.observation(store.runtime_status(clock()))
+                    next_observation=monotonic()+10
                 if days.due():
                     store.gap('LOCAL_DAY_OR_DISCOVERY_REFRESH',clock())
                     progress('DISCOVERY');days.refresh(stopped)
@@ -475,6 +501,7 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
                                 telemetry['delivery_ms_max']=max(telemetry['delivery_ms_max'],elapsed)
                                 next_delivery=monotonic()+.05
                             if monotonic()>=next_stats:
+                                if hasattr(progress,'observation'):progress.observation(store.runtime_status(at))
                                 store.set_meta('catalogue_counters',{'router':dict(router.counters),'markets':{k:dict(v) for k,v in router.per_market.items()}})
                                 telemetry['subscribed_tokens']=len(live_tokens)
                                 telemetry.update(native_timing(ws))
@@ -527,6 +554,7 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
                     break
             progress('STOPPING')
             store.gap('CATALOGUE_SESSION_ENDED',clock())
+            if hasattr(progress,'observation'):progress.observation(store.runtime_status(clock()))
             result['reconnects']=reconnects
             if telemetry.get('connected_ms'):telemetry.update(native_timing(ws))
             if sender:sender.close(store);sender_status()

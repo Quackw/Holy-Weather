@@ -1,5 +1,9 @@
 # HOLY WEATHER
 
+Prepared continuous PRICE runtime (not installed):
+[ownership, systemd templates, transition and current-data rollback](docs/PRICE_CONTINUOUS.md).
+Existing finite observations are unaffected; merge and server cutover need separate authorization.
+
 Independent Python monitor of public Polymarket temperature contracts. **One
 project, two independent algorithms, one Telegram bot.** The regional catalogue
 currently runs PRICE only; optional US AWC/LAMP remains in the single-contract
