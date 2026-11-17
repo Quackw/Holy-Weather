@@ -4,12 +4,64 @@ Only the planned units call this. Existing finite runners keep stdin credentials
 No token environment/argument fallback; malformed state fails closed with exit 78.
 """
 from pathlib import Path
-import json,os,re,resource,signal,stat,subprocess,threading,time
+import json,os,re,resource,signal,socket,stat,subprocess,threading,time
 from .core import canonical
 from .recovery import Plan,RecoveryStop,private,supervise,write
 from .lifecycle import STOP_REQUEST
 
 FATAL_EXIT=78
+
+
+class Health:
+    """Main-loop notifications only: a timer thread must never hide a deadlock.
+
+    STATUS reports controller/sender state, never quote readiness or delivery ACK.
+    No database writes, Telegram sends, retry decisions or credentials here.
+    """
+    def __init__(self,*,environment=None,monotonic=time.monotonic,notify=None):
+        env=os.environ if environment is None else environment
+        self.pid=os.getpid();self.thread=threading.get_ident();self.monotonic=monotonic;self.previous=None
+        self.next_ping=-float('inf');self.notify_failed=False
+        self.address=env.get('NOTIFY_SOCKET');usec=env.get('WATCHDOG_USEC')
+        self.armed=False;self.interval=10.
+        if usec and env.get('WATCHDOG_PID',str(self.pid))==str(self.pid):
+            if not usec.isdecimal() or not 0<int(usec)<=360000000:
+                raise RecoveryStop('SERVICE_WATCHDOG_BOUND')
+            if not self.address or not self.address.startswith(('/','@')) or '\x00' in self.address:
+                raise RecoveryStop('SERVICE_NOTIFY_SOCKET_REQUIRED')
+            self.armed=True;self.interval=min(10.,int(usec)/3000000)
+        self.notify=notify or self._notify
+
+    def _notify(self,message):
+        address='\x00'+self.address[1:] if self.address.startswith('@') else self.address
+        with socket.socket(socket.AF_UNIX,socket.SOCK_DGRAM) as s:
+            s.setblocking(False);s.sendto(message.encode(),address)
+
+    def __call__(self,value):
+        if os.getpid()!=self.pid or threading.get_ident()!=self.thread:raise RecoveryStop('SERVICE_HEALTH_OWNER')
+        def safe(v):return v if isinstance(v,str) and re.fullmatch('[A-Z][A-Z0-9_]{0,80}',v) else 'UNREPORTED'
+        enabled=value.get('telegram_enabled');reason=value.get('telegram_disabled_reason')
+        sender='ENABLED' if enabled is True else 'UNKNOWN' if enabled is not False else (
+            'OFF' if reason in ('NOT_ENABLED_IN_PLAN','NOT_ENABLED_IN_CONFIG') else 'DISABLED')
+        status=dict(controller=safe(value.get('status')),telegram=sender,
+                    reason=safe(reason) if reason is not None else None,watchdog='ARMED' if self.armed else 'OFF')
+        changed=status!=self.previous
+        if changed:
+            print(canonical(dict(event='PRICE_SERVICE_HEALTH',**status)),flush=True)
+            self.previous=status
+        if not self.armed:return
+        now=self.monotonic()
+        if not changed and now<self.next_ping:return
+        self.next_ping=now+self.interval
+        message='WATCHDOG=1\nSTATUS=PRICE controller='+status['controller']+'; Telegram='+sender
+        if status['reason']:message+='; reason='+status['reason']
+        try:self.notify(message)
+        except OSError:
+            if not self.notify_failed:print(canonical(dict(event='PRICE_SERVICE_NOTIFY_UNAVAILABLE')),flush=True)
+            self.notify_failed=True  # systemd still times out; no helper feeds it.
+        else:
+            if self.notify_failed:print(canonical(dict(event='PRICE_SERVICE_NOTIFY_RECOVERED')),flush=True)
+            self.notify_failed=False
 
 
 def credential(directory):
@@ -63,12 +115,15 @@ def run(plan_path,control):
     if not plan.continuous or plan.deadline_ms is not None:raise RecoveryStop('SERVICE_CONTINUOUS_PLAN_REQUIRED')
     stop=threading.Event()
     for sig in (signal.SIGTERM,signal.SIGINT):signal.signal(sig,lambda *_:stop.set())
+    health=Health();health(dict(status='INITIALIZING'))
     token=credential(os.environ.get('CREDENTIALS_DIRECTORY')) if plan.config.telegram_enabled else None
-    result=supervise(plan,control,token=token,stop=stop)
+    result=supervise(plan,control,token=token,stop=stop,on_health=health)
+    health(result)
     # All abnormal/uncertain limits are terminal. systemd only recovers a killed
     # controller; worker retry/backoff and budgets are owned durably by HW.
     print(canonical(dict(status=result['status'],active=result.get('active'),
-                         attempts=result.get('archived_attempts',0)+len(result['attempts']))))
+                         attempts=result.get('archived_attempts',0)+len(result['attempts']),
+                         **{k:result[k] for k in ('telegram_enabled','telegram_disabled_reason') if k in result})))
     # A newly requested graceful stop succeeds. Reopening an already latched
     # stop is an explicit refusal, not a successful start with no collector.
     return 0 if result['status']=='STOPPED' and stop.is_set() else FATAL_EXIT

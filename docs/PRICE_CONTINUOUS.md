@@ -9,6 +9,9 @@ authorization. A separately approved installation used runtime baseline
 [operations record](OPERATIONS.md). Existing observers must remain untouched
 without separate authority; this guide does not authorize repeating that cutover.
 
+The source-only [controller/sender health candidate](PRICE_SERVICE_HEALTH.md)
+adds watchdog/status supervision; it is not installed by updating documentation.
+
 ## Runtime contract
 
 `Plan.continuous=true`, `session_day=null`, `deadline_ms=null` opts in explicitly.

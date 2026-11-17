@@ -19,6 +19,7 @@ from test_catalogue import AT,feed
     ('unknown',{},'MANUAL_STOP'),
     ('stopping',{'SERVICE_RESULT':'success'},'HOST_SHUTDOWN'),
     ('degraded',{'SERVICE_RESULT':'signal','EXIT_STATUS':'SEGV'},'CONTROLLER_FAILURE'),
+    ('running',{'SERVICE_RESULT':'watchdog','EXIT_CODE':'killed','EXIT_STATUS':'ABRT'},'CONTROLLER_FAILURE'),
     ('running',{'SERVICE_RESULT':'exit-code','EXIT_CODE':'exited','EXIT_STATUS':'78'},'FATAL_SERVICE_EXIT')])
 def test_systemd_stop_context_is_durable_and_no_signals(gamma,tmp_path,identity,manager,env,reason):
     plan,_=seed(gamma,tmp_path);root,state=prepared(tmp_path,rolling(plan),active=False,status='STOPPED')
@@ -83,7 +84,9 @@ def immutable_rows(s):
             ('inputs','samples','events','event_inputs','state','latest','market')}
 
 
-def test_current_data_forward_and_old_code_rollback_after_new_rows(gamma,tmp_path,identity):
+@pytest.mark.parametrize('base',['81d00eed40ee179481822001f693a544d0fa2d29',
+                                '9adf061e412f73246cb7d83dffb30ead68792e24'])
+def test_current_data_forward_and_old_code_rollback_after_new_rows(gamma,tmp_path,identity,base):
     finite,m=seed(gamma,tmp_path);root,state=prepared(tmp_path,finite,active=False,status='STOPPED')
     r.write(root,'plan.json',dict(plan=finite.value(),identity=state['identity'],code=state['identity']['code']))
     with CatalogueStore(finite.config) as s:
@@ -107,7 +110,6 @@ def test_current_data_forward_and_old_code_rollback_after_new_rows(gamma,tmp_pat
         assert len(rows['events'])>1
     # Extract accepted 81d00ee source locally; no GitHub/network/production access.
     old=tmp_path/'old';old.mkdir()
-    base='81d00eed40ee179481822001f693a544d0fa2d29'
     names=subprocess.check_output(['git','ls-tree','-r','--name-only',base,'src/holy_weather'],text=True).splitlines()
     for name in names:
         if name.endswith('.py'):
