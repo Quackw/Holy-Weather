@@ -1,10 +1,13 @@
-# Continuous PRICE: prepared, not installed
+# Continuous PRICE: ownership, transition and rollback
 
 Scope: existing Europe (11 cities) and US (10), one controller/SQLite writer per
 region, two systemd instances, shared accepted PRICE/queue code. No weather,
 Telegram format, threshold, city or schema changes. Do not install from this guide
 without a separate exact package/cutover authorization. PR acceptance is not that
-authorization. Current finite observers must remain untouched during development.
+authorization. A separately approved installation used runtime baseline
+`8d176109b80628716f745b210d87bca00c5c51ed` on 17 November 2026; see the dated
+[operations record](OPERATIONS.md). Existing observers must remain untouched
+without separate authority; this guide does not authorize repeating that cutover.
 
 ## Runtime contract
 
@@ -76,9 +79,9 @@ read a running process/credential; encrypted-at-rest does not hide it from root.
   of a depth sample, stale saved baseline or socket heartbeat to PRICE readiness.
   Observations are snapshots (10 seconds), not guarantees after their timestamp.
 
-## Prepared layout and permissions
+## Runtime layout and permissions
 
-| Object | Future path | Ownership / mode |
+| Object | Runtime path | Ownership / mode |
 | --- | --- | --- |
 | Immutable release and locked venv | `/opt/holy-weather/releases/<commit>` | root, directories 755; source read-only to runtime |
 | Regional data/control/archive | `/var/lib/holy-weather/{europe,us}/{data,control,archive}` | existing `polymeteo-agent`, directories 700/files 600 |
@@ -99,9 +102,13 @@ OS reboot and reinstall are different recovery cases.
 References: [systemd service stop/restart policy](https://www.freedesktop.org/software/systemd/man/systemd.service.html),
 [encrypted credentials and runtime access](https://www.freedesktop.org/software/systemd/man/systemd.exec.html#Credentials).
 
-## Exact future cutover procedure (NOT executed)
+## Reviewed cutover procedure — new execution requires approval
 
-Prepare one immutable package manifest with this PR's final full commit, file SHA256,
+The installation recorded in OPERATIONS used a separately pinned manifest and
+verified these steps. The procedure below is retained for review, not as an
+idempotent repair script. Every new cutover needs fresh state and exact authority.
+
+Prepare one immutable package manifest with the approved full commit, file SHA256,
 locked wheels/Python, rendered files and **fresh** source-region paths/bindings and
 process identities. Pin that manifest in the single installation request. Do not
 reuse old PID observations or assume another PR's installation approval covers it.
@@ -122,7 +129,7 @@ directory. No wildcard process stop or retry of an uncertain operation.
 2. Under strict pinned SSH, stream the previously authorized bot secret via stdin
    only to the admin command below; do not put it in shell variables, arguments,
    an EnvironmentFile, plaintext temporary file or a transcript. This transfer and
-   the administrator action require the upcoming exact authorization.
+   the administrator action require the new operation's exact authorization.
 
    ```sh
    /usr/bin/systemd-creds encrypt --with-key=host --name=telegram - /etc/credstore.encrypted/holy-weather.telegram
@@ -140,7 +147,9 @@ directory. No wildcard process stop or retry of an uncertain operation.
    archive files/SHA; verify it and an independent off-server copy. No old snapshot
    may later overwrite current data. Europe first; its failure blocks US cutover.
 
-4. Future source map (recheck, never infer from the existence of a new directory):
+4. Historical source map for the 17 November cutover. These are **not** the current
+   stable destinations; recheck actual paths before any new authorized transition,
+   never infer active source from a directory's existence:
 
    | Region | Data | Control | Archive |
    | --- | --- | --- | --- |
@@ -187,7 +196,8 @@ directory. No wildcard process stop or retry of an uncertain operation.
    systemctl enable --now holy-weather-price@us.service
    ```
 
-   These are explicit future service changes, not authorized or performed now.
+   These commands change services and require the operation's separate authority;
+   the earlier approved installation is not permission to run them again.
    Verify actual `/proc` source/identity and both ownership locks; a folder or green
    CI is not proof that a new process uses it. Stop cutover on any unknown result.
 
@@ -226,14 +236,15 @@ actual controller SIGKILL, child graceful cgroup stop, persistent 30-second back
 restart and manual-stop refusal. Its file permissions/paths are adapted for the
 disposable runner. This is not a real host reboot or Netcup live qualification.
 
-After separately approved cutover, acceptance requires two natural windows per
-region, true fresh BBO and PRICE-ready counts (including NY/Atlanta), explicit sender
-state/real SENT only on an eligible new signal, no duplicate message IDs/events,
-each city's local rollover and then 24 hours of resource/history checks. A separately
-approved real Netcup reboot must verify credential decryption, exact loaded source,
-no second writer and continued current data. Until then **24/7 = NOT PROVEN**.
-Daily data/archive consumption remains NOT MEASURED for this prepared build; no
-short synthetic test is extrapolated to guaranteed daily storage.
+The separately approved installation completed two natural windows per region,
+fresh BBO/PRICE-ready checks (including NY/Atlanta), explicit sender state and
+new eligible SENT ACKs without duplicate events/message IDs. See the dated record;
+this is not a continuous guarantee. Live local-day/DST rollover and a full
+24-hour resource/history review remain open. A separately approved real Netcup
+reboot must verify credential decryption, exact loaded source, no second writer
+and continued current data. Until then **24/7 = NOT PROVEN**. Daily data/archive
+consumption remains NOT MEASURED; no short test is extrapolated to guaranteed
+daily storage. The unit has no independent controller watchdog or OnFailure hook.
 
 Local synthetic 200-window measurement: 21,001 bytes active control, 20 retained
 attempts, six audit batches / 221,556 JSON bytes in a 307,200-byte closed SQLite;
