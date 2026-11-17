@@ -15,6 +15,13 @@ ROTATE_ATTEMPTS=32
 ROTATION='rotation.json'
 STOP_REQUEST='service-stop.json'
 AUDIT='price_control_audit_v1:'
+SAFE_STOP_STATES={'SIGNAL_STOP','COMPLETED_WINDOW','CANCELLED_BEFORE_SPAWN',
+                  'NO_VERIFIED_CURRENT_MARKETS','ALL_MARKETS_CLOSED_OR_LOCAL_DATE_ENDED'}
+
+
+def clean_stop(state):
+    last=state['attempts'][-1] if state['attempts'] else None
+    return not last or bool(last.get('finished_ms') and not last.get('error') and last.get('state') in SAFE_STOP_STATES)
 
 
 class LifecycleStop(RuntimeError):pass
@@ -89,6 +96,7 @@ def reconcile(root,state,now,write,preflight):
     current=own_identity();previous=state.get('controller_process');request=stop_request(root,state)
     reason=request['reason'] if request else state.get('stop_reason')
     shutdown=reason=='HOST_SHUTDOWN' and previous and previous['boot']!=current['boot']
+    if state['status']=='STOPPED' and not clean_stop(state):return False
     if reason in ('MANUAL_STOP','FATAL_SERVICE_EXIT') or state['status'] in (
             'FATAL','UNKNOWN_EXIT','UNRESPONSIVE_NO_KILL','RESTART_BUDGET_EXHAUSTED','ATTEMPT_LIMIT','DEADLINE','NETWORK_REFUSED_NO_RETRY'):
         return False

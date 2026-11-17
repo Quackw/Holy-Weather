@@ -69,7 +69,9 @@ def run(plan_path,control):
     # controller; worker retry/backoff and budgets are owned durably by HW.
     print(canonical(dict(status=result['status'],active=result.get('active'),
                          attempts=result.get('archived_attempts',0)+len(result['attempts']))))
-    return 0 if result['status']=='STOPPED' else FATAL_EXIT
+    # A newly requested graceful stop succeeds. Reopening an already latched
+    # stop is an explicit refusal, not a successful start with no collector.
+    return 0 if result['status']=='STOPPED' and stop.is_set() else FATAL_EXIT
 
 
 def main(argv=None):

@@ -67,6 +67,17 @@ def test_templates_keep_limits_and_real_secure_boot_credential(tmp_path):
         assert (out/(region+'.json')).stat().st_mode&0o077==0
 
 
+@pytest.mark.parametrize('new_stop,expected',[(False,78),(True,0)])
+def test_service_distinguishes_latched_stop_from_current_sigterm(gamma,tmp_path,monkeypatch,new_stop,expected):
+    plan,_=seed(gamma,tmp_path);path=tmp_path/'plan.json';path.write_text(canonical(replace(rolling(plan),deadline_ms=None).value()))
+    monkeypatch.setattr(service.signal,'signal',lambda *a:None)
+    def supervise(*args,**kwargs):
+        if new_stop:kwargs['stop'].set()
+        return dict(status='STOPPED',attempts=[])
+    monkeypatch.setattr(service,'supervise',supervise)
+    assert service.run(path,tmp_path/'control')==expected
+
+
 def immutable_rows(s):
     return {name:list(s.c.execute('select * from '+name+' order by 1,2')) for name in
             ('inputs','samples','events','event_inputs','state','latest','market')}
@@ -165,6 +176,38 @@ def test_moving_active_data_is_refused_before_any_new_path(gamma,tmp_path):
     with CatalogueStore(plan.config,session=False):
         with pytest.raises(BlockingIOError):t.move_closed(plan.config.data_dir,destination/'data','data')
     assert not (destination/'data').exists() and not (destination/'data').is_symlink()
+
+
+def test_manual_resume_requires_explicit_closed_stop_and_preserves_debt(gamma,tmp_path,identity):
+    plan,_=seed(gamma,tmp_path);plan=rolling(plan);root,state=prepared(tmp_path,plan,active=False,status='STOPPED')
+    state['restarts']=[AT-1000];r.write(root,'state.json',state)
+    r.write(root,'plan.json',dict(plan=plan.value(),identity=state['identity'],code=state['identity']['code']))
+    service.record_stop(root,environment={'SERVICE_RESULT':'success'},manager_state='running')
+    with pytest.raises(r.RecoveryStop,match='ALREADY_BOUND'):
+        t.rebind(plan,root,state['identity'],[dict(OWNER,pid=99)],tmp_path/'not-authorized')
+    result=t.rebind(plan,root,state['identity'],[dict(OWNER,pid=99)],tmp_path/'explicit-resume',resume_manual=True)
+    assert result['binding']==state['identity']
+    after=json.loads((root/'state.json').read_text())
+    assert after['status']=='PREPARING' and after['restarts']==[AT-1000]
+    assert not (root/l.STOP_REQUEST).exists()
+    with CatalogueStore(plan.config,session=False) as s:
+        raw=json.loads(s.c.execute('select value from meta where key=?',(result['audit_key'],)).fetchone()[0])
+        assert json.loads(raw['files'][l.STOP_REQUEST])['reason']=='MANUAL_STOP'
+
+
+@pytest.mark.parametrize('failure',['UNKNOWN_EXIT','FATAL','CRASH'])
+def test_shutdown_or_manual_ack_never_overrides_last_child_failure(gamma,tmp_path,identity,failure):
+    plan,_=seed(gamma,tmp_path);plan=rolling(plan);root,state=prepared(tmp_path,plan,active=False,status='STOPPED')
+    state['attempts']=[dict(nonce='a'*32,state=failure,finished_ms=AT,error='StorageStop' if failure=='FATAL' else None)]
+    r.write(root,'state.json',state)
+    r.write(root,'plan.json',dict(plan=plan.value(),identity=state['identity'],code=state['identity']['code']))
+    service.record_stop(root,environment={'SERVICE_RESULT':'success'},manager_state='running')
+    with pytest.raises(r.RecoveryStop,match='CLEAN_MANUAL_STOP_REQUIRED'):
+        t.rebind(plan,root,state['identity'],[dict(OWNER,pid=99)],tmp_path/'refused',resume_manual=True)
+    assert not (tmp_path/'refused').exists()
+    request=json.loads((root/l.STOP_REQUEST).read_text());request['reason']='HOST_SHUTDOWN';r.write(root,l.STOP_REQUEST,request)
+    with patch.object(l,'own_identity',return_value=dict(OWNER,boot='next-boot')):
+        assert not l.reconcile(root,state,AT+1,r.write,lambda:pytest.fail('fatal recovery'))
 
 
 @pytest.mark.skipif(sys.platform!='linux',reason='Linux renameat2 atomic directory exchange in CI')

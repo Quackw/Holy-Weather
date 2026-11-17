@@ -36,8 +36,10 @@ ExecStop records intent **before** systemd sends cgroup SIGTERM: normal stop lat
 MANUAL_STOP; host manager `stopping` permits the *next boot*, not a same-boot restart;
 controller failure remains subject to HW budgets. Fatal exit 78 stays latched.
 Unknown manager context is a manual stop. A manual `systemctl restart` intentionally
-does not clear this latch. Resumption requires explicit closed-region `rebind`,
+does not clear this latch. Resumption requires explicit closed-region `rebind --resume-manual-stop`,
 which preserves the prior stop/audit and recovery debt; never remove state files.
+This flag accepts only the same verified binding and a clean STOPPED/MANUAL_STOP;
+it cannot clear fatal/unknown state or exhausted recovery budgets.
 systemd uses a 45-second graceful stop with SendSIGKILL=no; a hung child can therefore
 require intervention. No second writer is allowed while its inherited lock lives.
 

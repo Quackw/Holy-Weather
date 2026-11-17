@@ -58,7 +58,7 @@ def move_closed(source,destination,kind):
     return dict(source=str(source),destination=str(destination),kind=kind)
 
 
-def rebind(plan,control,expected,processes,backup,*,at=None,target_code=None):
+def rebind(plan,control,expected,processes,backup,*,at=None,target_code=None,resume_manual=False):
     """One attempt; any incomplete intent stops future supervision for review."""
     at=time.time_ns()//1000000 if at is None else at
     if target_code is not None and (plan.continuous or not re.fullmatch(r'[0-9a-f]{64}',target_code)):
@@ -83,7 +83,11 @@ def rebind(plan,control,expected,processes,backup,*,at=None,target_code=None):
         # Never carry an unfinished control rotation into a new binding.
         if (root/lifecycle.ROTATION).exists():raise RecoveryStop('TRANSITION_UNFINISHED_AUDIT')
         binding=dict(control=str(root),plan=sha(plan.value()),code=target_code or code_identity())
-        if binding==expected:raise RecoveryStop('TRANSITION_ALREADY_BOUND')
+        if binding==expected and not resume_manual:raise RecoveryStop('TRANSITION_ALREADY_BOUND')
+        if resume_manual:
+            request=lifecycle.stop_request(root,state)
+            if binding!=expected or state['status']!='STOPPED' or not lifecycle.clean_stop(state) or not request or request['reason']!='MANUAL_STOP':
+                raise RecoveryStop('TRANSITION_CLEAN_MANUAL_STOP_REQUIRED')
         with lifecycle.closed_database(plan) as c:
             row=c.execute("select value from meta where key='price_recovery_control_v1'").fetchone()
             if not row or json.loads(row[0])!=expected:raise RecoveryStop('TRANSITION_BINDING_RACE')
@@ -141,10 +145,11 @@ def main():
     a=sub.add_parser('rebind')
     for name in ('plan','control-dir','expected','process-proof','backup'):a.add_argument('--'+name,required=True)
     a.add_argument('--target-code',help='Separately verified old code identity; finite rollback only')
+    a.add_argument('--resume-manual-stop',action='store_true',help='Explicit same-binding clean manual stop acknowledgement; never a fatal reset')
     a=p.parse_args()
     if a.command=='move':result=move_closed(a.source,a.destination,a.kind)
     else:result=rebind(Plan.load(json.loads(Path(a.plan).read_text())),a.control_dir,
-                  json.loads(Path(a.expected).read_text()),json.loads(Path(a.process_proof).read_text()),a.backup,target_code=a.target_code)
+                  json.loads(Path(a.expected).read_text()),json.loads(Path(a.process_proof).read_text()),a.backup,target_code=a.target_code,resume_manual=a.resume_manual_stop)
     print(canonical(result))
 
 

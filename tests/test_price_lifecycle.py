@@ -11,6 +11,7 @@ from test_price_recovery import seed,Sim
 from test_catalogue import AT
 
 OWNER=dict(boot='synthetic-boot',pid=100,start_ticks=20,uid=os.getuid(),exe='/synthetic/python')
+REAL_ALIVE=l.alive
 
 
 def rolling(plan):return replace(plan,session_day=None,continuous=True)
@@ -88,7 +89,7 @@ def test_reconcile_closed_launch_boundaries_and_pid_reuse(gamma,tmp_path,identit
         owner=json.loads((root/(nonce+'.owner.json')).read_text());owner['controller']=state['controller_process'];r.write(root,nonce+'.owner.json',owner)
     if boundary=='pid-reused':
         with patch.object(l,'process_identity',return_value=dict(OWNER,pid=123,start_ticks=999)):
-            assert not l.alive(process)  # Identity differs although PID is equal.
+            assert not REAL_ALIVE(process)  # Same PID, genuinely different kernel start identity.
     assert l.reconcile(root,state,AT+1,r.write,lambda:r.preflight(plan))
     assert state['active'] is None and state['retry'] and len(state['restarts'])==1
     assert state['next_ms']==AT+30001 and state['attempts'][0]['returncode'] is None
@@ -154,9 +155,13 @@ print(p.pid,flush=True)
         import fcntl
         with pytest.raises(BlockingIOError):fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)
         limit=time.monotonic()+4
-        while l.alive(ident) and time.monotonic()<limit:time.sleep(.05)
-        assert not l.alive(ident)
-        fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        while time.monotonic()<limit:
+            if not l.alive(ident):
+                try:fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB);break
+                except BlockingIOError:pass
+            time.sleep(.05)
+        else:pytest.fail('Exited identity without released inherited guard')
+        assert not l.alive(ident)  # Both process identity AND actual lock agree.
 
 
 def test_worker_requires_guard_before_database_open(gamma,tmp_path,identity):
