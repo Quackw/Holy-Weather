@@ -111,7 +111,9 @@ def test_native_queue_backpressure_can_timeout_with_responding_peer():
 def test_unmeasured_native_rtt_is_not_zero():
     from holy_weather.catalogue import native_timing
     class WS:latency=0.0
-    assert native_timing(WS())=={'native_last_pong_ms':None,'native_rtt_ms':None}
+    assert native_timing(WS())=={'native_last_pong_ms':None,'native_rtt_ms':None,
+        'native_receive_queue':{'frames':None,'paused':None,'max_observed_frames':None,
+            'observations':None,'paused_observations':None,'socket_readable_bytes':None}}
 
 
 @pytest.mark.parametrize('code',[1008,1009])
@@ -192,5 +194,123 @@ def test_timed_connection_factory_real_handshake_and_native_pong():
             while client.native_last_pong_ms is None and time.monotonic()<deadline:threading.Event().wait(.001)
             assert client.native_last_pong_ms is not None
             assert native_timing(client)['native_rtt_ms'] is not None
+            server.send('unchanged market frame')
+            deadline=time.monotonic()+1
+            while not getattr(client,'native_receive_observation',(0,0,0))[0] and time.monotonic()<deadline:threading.Event().wait(.001)
+            q=native_timing(client)['native_receive_queue']
+            assert q['frames']==1 and q['max_observed_frames']>=1 and q['observations']==1
+            assert client.recv(timeout=1)=='unchanged market frame'
+            assert native_timing(client)['native_receive_queue']['frames']==0
     finally:
         server.close_socket();peer.join(.5)
+
+
+def test_receive_queue_measurements_observe_real_backpressure_without_draining():
+    import socket,threading,time
+    from websockets.sync.connection import Connection
+    from websockets.protocol import Protocol,CLIENT,SERVER,OPEN
+    from holy_weather.catalogue import native_timing,sample_receive_queue
+    left,right=socket.socketpair()
+    client=Connection(left,Protocol(CLIENT,state=OPEN),ping_interval=None,close_timeout=.05,max_queue=16)
+    peer=Connection(right,Protocol(SERVER,state=OPEN),ping_interval=None,close_timeout=.05)
+    try:
+        for n in range(18):peer.send(str(n))
+        deadline=time.monotonic()+1
+        while not client.recv_messages.paused and time.monotonic()<deadline:threading.Event().wait(.001)
+        sample_receive_queue(client)
+        q=native_timing(client)['native_receive_queue']
+        assert q['paused'] and q['frames']>=17 and q['max_observed_frames']>=17
+        assert q['observations']==1 and q['paused_observations']==1
+        assert [client.recv(timeout=1) for _ in range(18)]==[str(n) for n in range(18)]
+        assert native_timing(client)['native_receive_queue']['frames']==0
+    finally:
+        client.close_socket();peer.close_socket()
+        client.recv_events_thread.join(.5);peer.recv_events_thread.join(.5)
+
+
+def test_unread_socket_measurement_does_not_consume_bytes_or_turn_missing_into_zero():
+    import socket
+    from types import SimpleNamespace
+    from holy_weather.catalogue import socket_readable_bytes
+    left,right=socket.socketpair()
+    try:
+        right.sendall(b'original')
+        assert socket_readable_bytes(SimpleNamespace(socket=left))==8
+        assert left.recv(8)==b'original'
+        assert socket_readable_bytes(SimpleNamespace(socket=left))==0
+    finally:left.close();right.close()
+    assert socket_readable_bytes(SimpleNamespace(socket=left)) is None
+    assert socket_readable_bytes(SimpleNamespace()) is None
+
+
+def test_receive_observation_is_bounded_and_optional_faults_do_not_break_frames(monkeypatch):
+    from types import SimpleNamespace
+    from holy_weather.catalogue import native_timing,sample_receive_queue,TimedClientConnection
+    from websockets.sync.client import ClientConnection
+    from websockets.frames import Frame,TEXT
+    import queue
+    frames=queue.SimpleQueue();frames.put('retained')
+    ws=SimpleNamespace(recv_messages=SimpleNamespace(frames=frames,paused=True))
+    for _ in range(6000):sample_receive_queue(ws)
+    q=native_timing(ws)['native_receive_queue']
+    assert q['observations']==6000 and q['paused_observations']==6000 and q['max_observed_frames']==1
+    assert len(json.dumps(q))<256 and frames.get_nowait()=='retained'
+    ws.native_receive_observation=(2**63-1,2**63-1,1)
+    sample_receive_queue(ws)
+    assert ws.native_receive_observation==(2**63-1,2**63-1,1)
+    class Unavailable:
+        def qsize(self):raise RuntimeError('private exception text must not enter diagnostics')
+    instrumented=object.__new__(TimedClientConnection)
+    instrumented.recv_messages=SimpleNamespace(frames=Unavailable(),paused=True)
+    delivered=[]
+    monkeypatch.setattr(ClientConnection,'process_event',lambda self,event:delivered.append(event))
+    frame=Frame(TEXT,b'original payload')
+    instrumented.process_event(frame)
+    assert delivered==[frame]
+    q=native_timing(instrumented)['native_receive_queue']
+    assert q['frames'] is None and q['paused'] is None and 'private' not in json.dumps(q)
+
+
+def test_previous_reader_keeps_new_metrics_events_and_receipts(gamma,tmp_path):
+    from dataclasses import asdict
+    import os,subprocess,sys
+    from pathlib import Path
+    from holy_weather.alert_queue import preview,claim,finish
+    from test_catalogue import feed
+    cfg,markets=setup(gamma,tmp_path,1);m,receipt=markets[0]
+    metrics={'native_receive_queue':{'frames':17,'paused':True,'max_observed_frames':18,
+        'observations':6000,'paused_observations':9,'socket_readable_bytes':32}}
+    with CatalogueStore(cfg) as store:
+        store.bind(m,receipt);store.connection_started(AT);router=Router(store)
+        feed(router,m,'0.49',AT+1);feed(router,m,'0.81',AT+2)
+        key=store.c.execute("select key from meta where key like 'alert_delivery_v1:%'").fetchone()[0]
+        card=preview(store,key);assert claim(store,card,AT+3)
+        finish(store,card,{'status':'SENT','message_id':10},AT+4)
+        store.transport_record({'kind':'CONNECTING','at_ms':AT+5},metrics)
+        before={'events':[tuple(x) for x in store.c.execute('select * from events order by id')],
+                'state':[tuple(x) for x in store.c.execute("select key,value from meta where key like 'price_alert_v1:%' or key like 'alert_delivery_v1:%' order by key")]}
+        count=store.c.execute('select count(*) from inputs').fetchone()[0]
+    old=tmp_path/'previous';base='e605e338131e6bdbd0ee101f42f26e52a04bf87c'
+    names=subprocess.check_output(['git','ls-tree','-r','--name-only',base,'src/holy_weather'],text=True).splitlines()
+    for name in names:
+        if not name.endswith('.py'):continue
+        dest=old/Path(name).relative_to('src');dest.parent.mkdir(parents=True,exist_ok=True)
+        dest.write_bytes(subprocess.check_output(['git','show',base+':'+name]))
+    script="""import json,sys
+from holy_weather.catalogue import CatalogueConfig,CatalogueStore
+v=json.loads(sys.argv[1]);v['levels']=tuple(v['levels'])
+with CatalogueStore(CatalogueConfig(**v),session=False) as s:
+ assert s.transport_record()['snapshot']==json.loads(sys.argv[2])
+ s.reject({'fixture':'old runtime after new metrics'},'TEST',int(sys.argv[3]),invalidate_state=False)
+ assert s.c.execute('pragma integrity_check').fetchone()[0]=='ok'
+ assert not s.c.execute('pragma foreign_key_check').fetchall()
+ assert s.c.execute('pragma user_version').fetchone()[0]==1
+ print(json.dumps({'events':[tuple(x) for x in s.c.execute('select * from events order by id')],
+ 'state':[tuple(x) for x in s.c.execute(\"select key,value from meta where key like 'price_alert_v1:%' or key like 'alert_delivery_v1:%' order by key\")]}))
+"""
+    env=dict(os.environ,PYTHONPATH=str(old),PYTHONDONTWRITEBYTECODE='1')
+    result=json.loads(subprocess.check_output([sys.executable,'-B','-c',script,json.dumps(asdict(cfg)),json.dumps(metrics),str(AT+6)],env=env,text=True))
+    assert result==json.loads(json.dumps(before))
+    with CatalogueStore(cfg,session=False) as store:
+        assert store.c.execute('select count(*) from inputs').fetchone()[0]==count+1
+        assert store.transport_record()['snapshot']==metrics
