@@ -9,6 +9,10 @@ from .storage import Store
 from .weather import millis
 from .alert_queue import TARGET,PREFIX,preview,claim,finish
 
+HTTP_TIMEOUT_SECONDS=5
+# Fits the controller's 30s termination grace and 60s STOPPING watchdog.
+CLOSE_WAIT_SECONDS=HTTP_TIMEOUT_SECONDS+1
+
 def post(token,preview,*,fetch=urlopen,clock=millis):
     """No logs of URL/token/response description; no retry, even on timeout/429."""
     if not preview['test'] and not preview['event_ms']<=clock()<=preview['expires_ms']:
@@ -16,7 +20,7 @@ def post(token,preview,*,fetch=urlopen,clock=millis):
     try:
         body=json.dumps(dict(chat_id=TARGET,text=preview['html'],parse_mode='HTML',link_preview_options={'is_disabled':True},disable_notification=preview['test'])).encode()
         request=Request('https://api.telegram.org/bot'+token+'/sendMessage',data=body,headers={'Content-Type':'application/json'},method='POST')
-        with fetch(request,timeout=5)as r:
+        with fetch(request,timeout=HTTP_TIMEOUT_SECONDS)as r:
             raw=r.read(65537)
         if len(raw)>65536:return {'status':'UNKNOWN','reason':'RESPONSE_BOUND'}
         data=json.loads(raw)
@@ -47,20 +51,30 @@ class Sender:
         if type(minimum_interval_ms)is not int or not 0<=minimum_interval_ms<=60000:raise ValueError("SEND_INTERVAL_BOUND")
         self.minimum_interval_ms=minimum_interval_ms;self.next_send_ms=0
         self.token=token;self.transport=transport;self.thread=None;self.results=queue.Queue(maxsize=1);self.stopped=False
-    def tick(self,store,at):
-        from .alert_queue import advance_waits
-        advance_waits(store,at)
+        self.closed=False;self.inflight=False;self.disabled_reason=None
+    def status(self):
+        return dict(telegram_enabled=self.disabled_reason is None,telegram_disabled_reason=self.disabled_reason)
+    def _collect(self,store):
         try:
             p,r,completed=self.results.get_nowait()
         except queue.Empty:pass
         else:
             finish(store,p,r,completed)
-            if r['status']!='SENT':self.stopped=True
+            self.inflight=False
+            if r['status']!='SENT':
+                self.stopped=True
+                self.disabled_reason='SEND_RESULT_UNKNOWN' if r['status']=='UNKNOWN' else 'SEND_RESULT_NOT_SENT'
+    def tick(self,store,at):
+        if self.closed:return
+        from .alert_queue import advance_waits
+        advance_waits(store,at)
+        self._collect(store)
         if self.stopped or (self.thread and self.thread.is_alive()) or at<self.next_send_ms:return
         row=store.c.execute("select key from meta where key like ? and json_extract(value,'$.status')='PENDING' and coalesce(json_extract(value,'$.not_before_ms'),0)<=? order by coalesce(json_extract(value,'$.priority'),0) desc,json_extract(value,'$.event_ms'),key limit 1",(PREFIX+'%',at)).fetchone()
         if not row:return
         p=preview(store,row[0])
         if not claim(store,p,at):return
+        self.inflight=True
         self.next_send_ms=at+self.minimum_interval_ms
         def send():
             try:r=self.transport(self.token,p)
@@ -68,7 +82,12 @@ class Sender:
             self.results.put_nowait((p,r,millis()))
         self.thread=threading.Thread(target=send,daemon=True);self.thread.start()
     def close(self,store):
-        self.stopped=True;self.tick(store,millis())
+        if self.closed:return self.status()
+        self.closed=True;self.stopped=True  # No new claims, including a later tick.
+        if self.thread and self.inflight:self.thread.join(CLOSE_WAIT_SECONDS)
+        self._collect(store)  # The SQLite writer still owns Store here.
+        if self.inflight:self.disabled_reason='SEND_RESULT_UNKNOWN_AT_CLOSE'
+        return self.status()
 
 
 def main():

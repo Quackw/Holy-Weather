@@ -275,8 +275,9 @@ def discover_city(city, *, clock=None, fetch=None):
 
 class DayDiscovery:
     """Revalidate on restart/date change; bounded retries only for known unavailability."""
-    def __init__(self, store, discover, clock):
+    def __init__(self, store, discover, clock, session_day=None):
         self.store=store;self.discover=discover;self.clock=clock
+        self.session_day=session_day
         self.days={};self.selected=set();self.results={};self.retry={}
 
     def due(self):
@@ -296,6 +297,11 @@ class DayDiscovery:
             self.selected={c for c in self.selected if s.markets[c]['station']!=station}
             s.expire_closed_deliveries(at);s.retire(at)
             self.selected.intersection_update(s.markets)
+            if self.session_day is not None and day!=self.session_day:
+                # A finite old-day session must not consume/block tomorrow's
+                # discovery attempts merely because another timezone is active.
+                self.results[city]={'verified_buckets':0,'reason':'SESSION_LOCAL_DATE_ENDED'}
+                continue
             key=DAY_PREFIX+city
             row=s.c.execute('select value from meta where key=?',(key,)).fetchone()
             previous=json.loads(row[0]) if row else {}
@@ -343,7 +349,8 @@ class DayDiscovery:
 
 
 def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=None, token=None,
-                      clock=None, monotonic=time.monotonic, stop=None, wait=None):
+                      clock=None, monotonic=time.monotonic, stop=None, wait=None, progress=None, session_day=None,
+                      on_sender_status=None):
     """Finite session with local-day revalidation; no service or extended deadline."""
     import threading
     from websockets.exceptions import WebSocketException
@@ -356,12 +363,23 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
     if cfg.telegram_enabled and not token:raise ValueError('EXPLICIT_TELEGRAM_TOKEN_REQUIRED')
     sender=Sender(token,**({'transport':transport} if transport else {}),minimum_interval_ms=3100) if cfg.telegram_enabled else None
     result={'cities':{},'state':'PREPARING','telegram_enabled':cfg.telegram_enabled,'weather_enabled':False}
+    reported_sender=None
+    def sender_status():
+        nonlocal reported_sender
+        value=sender.status() if sender else dict(telegram_enabled=False,telegram_disabled_reason='NOT_ENABLED_IN_CONFIG')
+        if value!=reported_sender:
+            reported_sender=value
+            result.update(value)
+            if on_sender_status:on_sender_status(value)
+    sender_status()
+    progress=progress or (lambda stage:None)
+    progress('STARTING')
     with CatalogueStore(cfg) as store:
         try:
             deadline=monotonic()+cfg.duration_seconds
-            days=DayDiscovery(store,discover,clock)
+            days=DayDiscovery(store,discover,clock,session_day=session_day)
             stopped=lambda:stop.is_set() or monotonic()>=deadline
-            days.refresh(stopped)
+            progress('DISCOVERY');days.refresh(stopped)
             selected=days.selected
             result['cities']=days.results
             router=Router(store,selected)
@@ -369,9 +387,10 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
             reconnects=0
             telemetry={}
             while not stop.is_set() and monotonic()<deadline:
+                progress('OBSERVING')
                 if days.due():
                     store.gap('LOCAL_DAY_OR_DISCOVERY_REFRESH',clock())
-                    days.refresh(stopped)
+                    progress('DISCOVERY');days.refresh(stopped)
                     selected=days.selected;result['cities']=days.results
                     router.selected=set(selected)
                     for condition in selected:router.per_market.setdefault(condition,Counter())
@@ -403,6 +422,7 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
                         last_ping=monotonic();last_pong=last_ping;next_stats=last_ping
                         next_maintenance=next_delivery=last_ping
                         while not stop.is_set() and monotonic()<deadline:
+                            progress('OBSERVING')
                             at=clock()
                             if days.due():break
                             if subscribed<len(tokens) and monotonic()>=next_subscription:
@@ -430,7 +450,7 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
                                 # Always recheck lifecycle immediately before send,
                                 # including between throttled global market scans.
                                 store.expire_closed_deliveries(at)
-                                if sender:sender.tick(store,at)
+                                if sender:sender.tick(store,at);sender_status()
                                 else:advance_waits(store,at)
                                 elapsed=round((monotonic()-delivery_start)*1000,3)
                                 telemetry['delivery_ticks']+=1
@@ -488,10 +508,11 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
                 else:
                     if days.due() or not any(store.active(c,clock()) for c in selected):continue
                     break
+            progress('STOPPING')
             store.gap('CATALOGUE_SESSION_ENDED',clock())
             result['reconnects']=reconnects
             if telemetry.get('connected_ms'):telemetry.update(native_timing(ws))
-            if sender:sender.close(store)
+            if sender:sender.close(store);sender_status()
             if stop.is_set():result['state']='SIGNAL_STOP'
             result['transport']=store.transport_record({'kind':'STOPPED','at_ms':clock(),'state':result['state'],'reconnects':reconnects},telemetry)
             result['counters']={'router':dict(router.counters),'markets':{k:dict(v) for k,v in router.per_market.items()}}
@@ -502,7 +523,7 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
             result['data_bytes']=store.usage()
             return result
         finally:
-            if sender:sender.close(store)
+            if sender:sender.close(store);sender_status()
 
 
 def main():
