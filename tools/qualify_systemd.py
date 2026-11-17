@@ -28,8 +28,9 @@ if len(sys.argv)>1 and sys.argv[1]=='worker':
 else:
  original=service.supervise
  def spawn(root,nonce,token,fd):
-  return subprocess.Popen([sys.executable,'-B',__file__,'worker',str(root),nonce,str(fd)],
-   stdin=subprocess.PIPE,text=True,pass_fds=(fd,),stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+  with (Path(__file__).parent/'offline-child.stderr').open('ab') as log:
+   return subprocess.Popen([sys.executable,'-B',__file__,'worker',str(root),nonce,str(fd)],
+    stdin=subprocess.PIPE,text=True,pass_fds=(fd,),stdout=subprocess.DEVNULL,stderr=log)
  service.supervise=lambda plan,root,**kw:original(plan,root,_spawn=spawn,**kw)
  raise SystemExit(service.main(sys.argv[1:]))
 '''
@@ -99,6 +100,13 @@ def main():
         assert not c.execute('pragma foreign_key_check').fetchall();c.close()
         report.update(manual_stop_latch='PASS',encrypted_credential='PASS',sqlite='PASS',result='PASS')
     finally:
+        # This disposable probe uses only a fixed dummy credential and no public
+        # traffic. Retain bounded failure evidence instead of guessing a timeout.
+        if report.get('result')!='PASS':
+            for name in ('control/state.json','offline-child.stderr'):
+                p=base/name
+                if p.exists():print(name+': '+p.read_text()[-16000:])
+            print(command('/usr/bin/journalctl','--no-pager','-u',unit_name,'-n','40','-o','cat'))
         subprocess.run(['/usr/bin/systemctl','stop',unit_name],capture_output=True,timeout=50)
         # Only the disposable runner unit, never user data/evidence, is retired.
         unit_path.unlink();subprocess.run(['/usr/bin/systemctl','daemon-reload'],capture_output=True,timeout=10)

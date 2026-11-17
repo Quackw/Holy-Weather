@@ -273,9 +273,12 @@ def supervise(plan,control_dir,*,token=None,stop=None,clock=None,monotonic=time.
             if archive==root or root in archive.parents or archive in root.parents:raise RecoveryStop('RECOVERY_CONTROL_ARCHIVE_OVERLAP')
         code=code_identity();identity=dict(control=str(root),plan=sha(plan.value()),code=code)
         state_path=root/'state.json';saved_plan=dict(plan=plan.value(),code=code,identity=identity)
-        if state_path.exists():
-            state=json.loads(state_path.read_text())
-            if state['identity']!=identity:raise RecoveryStop('RECOVERY_IDENTITY_DRIFT')
+        state=json.loads(state_path.read_text()) if state_path.exists() else None
+        if state is not None and state['identity']!=identity:raise RecoveryStop('RECOVERY_IDENTITY_DRIFT')
+        # Refuse corrupted configuration before reconciliation can change owner,
+        # charge a recovery, or retire already committed audit files.
+        if (root/'plan.json').exists() and canonical(json.loads((root/'plan.json').read_text()))!=canonical(saved_plan):raise RecoveryStop('RECOVERY_PLAN_DRIFT')
+        if state is not None:
             if plan.continuous:
                 state=lifecycle.finish_rotation(root,plan,state,write)
                 if not lifecycle.reconcile(root,state,clock(),write,lambda:preflight(plan)):
@@ -289,7 +292,6 @@ def supervise(plan,control_dir,*,token=None,stop=None,clock=None,monotonic=time.
         if plan.continuous:
             state['controller_process']=lifecycle.own_identity()
             state=lifecycle.compact_control(root,plan,state,write,clock())
-        if (root/'plan.json').exists() and canonical(json.loads((root/'plan.json').read_text()))!=canonical(saved_plan):raise RecoveryStop('RECOVERY_PLAN_DRIFT')
         write(root,'plan.json',saved_plan)
         mono_deadline=float('inf') if plan.deadline_ms is None else monotonic()+max(0,(plan.deadline_ms-clock())/1000)
         retry=bool(state.get('retry'));child=None

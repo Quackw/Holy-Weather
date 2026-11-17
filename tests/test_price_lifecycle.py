@@ -165,6 +165,15 @@ def test_worker_requires_guard_before_database_open(gamma,tmp_path,identity):
     with pytest.raises(l.LifecycleStop,match='GUARD_REQUIRED'):r.worker(root,state['active'],None)
 
 
+def test_bad_saved_plan_cannot_rewrite_owner_or_charge_recovery(gamma,tmp_path,identity):
+    plan,_=seed(gamma,tmp_path);plan=rolling(plan);root,state=prepared(tmp_path,plan,active=False,status='COMPLETED_WINDOW')
+    drift=dict(plan.value(),phase_seconds=3)
+    r.write(root,'plan.json',dict(plan=drift,identity=state['identity'],code=state['identity']['code']))
+    before=(root/'state.json').read_bytes()
+    with pytest.raises(r.RecoveryStop,match='PLAN_DRIFT'):r.supervise(plan,root)
+    assert (root/'state.json').read_bytes()==before
+
+
 def test_continuous_uses_per_city_discovery_and_bounded_window(gamma,tmp_path,identity,monkeypatch):
     plan,_=seed(gamma,tmp_path);plan=replace(rolling(plan),deadline_ms=None);root,state=prepared(tmp_path,plan)
     r.write(root,'plan.json',dict(plan=plan.value(),identity=state['identity'],code=r.code_identity()))
