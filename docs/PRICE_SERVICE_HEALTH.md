@@ -8,8 +8,10 @@ no active observer, database or unit is changed by this PR.
 
 The existing regional unit gains `WatchdogSec=360s`, `NotifyAccess=main` and an
 explicit `WatchdogSignal=SIGABRT`. The controller sends `WATCHDOG=1` from its
-actual supervision loop, at most every ten seconds (or one third of the manager's
-shorter interval). There is no timer/helper thread that could keep a deadlocked
+actual supervision loop. Regular polls throttle pings to ten seconds (or one third
+of the manager's shorter interval); state changes report immediately. Existing
+intentional idle waits can take 30 seconds, still below the six-minute bound.
+There is no timer/helper thread that could keep a deadlocked
 controller looking alive. Child processes do not inherit the notification
 environment and cannot feed the main-only watchdog.
 
