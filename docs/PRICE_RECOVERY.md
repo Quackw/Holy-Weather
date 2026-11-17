@@ -103,6 +103,30 @@ past the latest supported city's next local midnight. Original station/rule/
 token validation is repeated by catalogue discovery. A fixed old-day session
 does not consume tomorrow's discovery attempts while later timezones remain open.
 
+### Inherited end-of-session discovery refusals
+
+Older finite launchers could persist `SESSION_LOCAL_DATE_ENDED` as the next
+local day's `BLOCKED` discovery even though they never requested that market.
+On that actual local day, discovery admits only the exact known legacy record:
+`BLOCKED`, attempt 1, one `SESSION_LOCAL_DATE_ENDED` skip, a same-day non-future
+timestamp and no HTTP receipt, extra fields or refusal reasons. An ended finite
+session still cannot admit the following day.
+
+Before requesting Gamma, the sole SQLite writer atomically retains the original
+raw value at `price_catalogue_day_refusal_v1:<city>:<day>` and records the ordinary
+`IN_PROGRESS` attempt 2. That historical attempt remains charged against the
+existing three-attempt budget. An existing audit entry or unknown `IN_PROGRESS`
+attempt cannot be replayed; real access/rule failures remain blocked. All normal
+station, date, timezone and token checks still apply. This does not mark a city
+ready until its current contracts and fresh WebSocket quotes are verified.
+
+SQLite stays at v1. No PRICE event, fired threshold, delivery receipt or input is
+removed by this compatibility path. Exact accepted-main rollback can open the
+current database after new records without restoring an old snapshot; its reader
+ignores the retained refusal audit. Deployment must separately respect the
+controller's code/plan binding and writer lock; do not replace active source or
+reset a controller to install this change.
+
 Telegram remains OFF unless explicitly selected in that approved plan. If ON,
 the token is read from stdin and passed to the child through an anonymous pipe,
 never argv, environment, a control file or logs. Core dumps are disabled by the

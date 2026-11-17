@@ -17,6 +17,7 @@ from .app import process
 MAX_MARKETS = 176  # eleven cities, at most sixteen verified buckets each
 PREFIX = 'price_catalogue_v1:'
 DAY_PREFIX = 'price_catalogue_day_v1:'
+DAY_REFUSAL_PREFIX = 'price_catalogue_day_refusal_v1:'
 
 
 # The library already owns the receiver thread. It only updates two scalar
@@ -308,7 +309,19 @@ class DayDiscovery:
             if previous.get('day','')>day:
                 self.results[city]={'verified_buckets':0,'reason':'LOCAL_DATE_REGRESSION'};continue
             same=previous.get('day')==day
-            if same and previous.get('status') in ('IN_PROGRESS','BLOCKED'):
+            # Old finite launchers recorded their own end-of-session refusal as
+            # tomorrow's BLOCKED discovery, without ever requesting that market.
+            # Admit only this exact inherited shape, once; retain its raw audit
+            # and charged attempt. Real refusals/unknown requests stay closed.
+            refusal_key=DAY_REFUSAL_PREFIX+city+':'+day
+            legacy=(same and set(previous)=={'day','at_ms','attempts','status','skipped'}
+                    and previous['status']=='BLOCKED' and type(previous['attempts']) is int
+                    and previous['attempts']==1 and type(previous['at_ms']) is int
+                    and 0<=previous['at_ms']<=at
+                    and local_days(previous['at_ms'],{city:s.cfg.cities[city]})[city]==day
+                    and previous['skipped']==[{'reason':'SESSION_LOCAL_DATE_ENDED'}]
+                    and not s.c.execute('select 1 from meta where key=?',(refusal_key,)).fetchone())
+            if same and previous.get('status') in ('IN_PROGRESS','BLOCKED') and not legacy:
                 self.results[city]={'verified_buckets':0,'reason':'DISCOVERY_'+previous['status']};continue
             attempts=previous.get('attempts',0) if same and previous.get('status')!='VERIFIED' else 0
             if attempts>=3:
@@ -316,7 +329,11 @@ class DayDiscovery:
             if same and previous.get('next_ms',0)>at:
                 self.retry[city]=previous['next_ms'];continue
             state=dict(day=day,attempts=attempts+1,status='IN_PROGRESS',at_ms=at)
-            s.set_meta(key,state)
+            if legacy:
+                with s.transaction():
+                    s.c.execute('insert into meta values(?,?)',(refusal_key,row[0]))
+                    s.c.execute('insert or replace into meta values(?,?)',(key,canonical(state)))
+            else:s.set_meta(key,state)
             try:
                 markets,receipt,skipped=self.discover(city)
                 if receipt:
