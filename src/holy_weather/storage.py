@@ -96,6 +96,8 @@ class Store:
             if current and current[0] != cfg.rule_hash():
                 raise StorageStop('CONFIG_RULE_DRIFT_USE_NEW_DATA_DIRECTORY')
             self.c.execute("insert or ignore into meta values('rule_hash',?)", (cfg.rule_hash(),))
+            from .history import Seen
+            self.history_seen=Seen(self.c)
             if session:
                 self.gap('PROCESS_START_OR_RESTART', int(time.time()*1000))
         except Exception:
@@ -209,6 +211,7 @@ class Store:
 
     def known_duplicate(self,sample):
         return (self.seen_tops.get(sample.get('token'),{}).get('identity')==sample['id'] or
+                self.history_seen.contains(sample['id']) or
                 bool(self.c.execute('select 1 from inputs i join samples s on s.input_id=i.id where i.identity=?',(sample['id'],)).fetchone()))
 
     def quote_status(self, research_status):
@@ -220,6 +223,8 @@ class Store:
         raw = canonical(sample['raw']).encode()
         if len(raw) > 262144:
             raise ValueError('INPUT_BOUND')
+        if self.history_seen.contains(sample['id']):
+            return {'status':'DUPLICATE','events':[],'raw_bytes':0,'compressed_bytes':0}
         with self.transaction():
             prior = self.c.execute('select id from inputs where identity=?', (sample['id'],)).fetchone()
             if prior:
@@ -405,8 +410,9 @@ class Store:
         if len(value)>262144:
             value=canonical({'rejected_sha256':sha(value),'reason':'REJECTED_INPUT_TOO_LARGE'}).encode()
         with self.transaction():
-            self.c.execute('insert or ignore into inputs(identity,received_ms,raw,raw_sha) values(?,?,?,?)',
-                           (sha(value),at,zlib.compress(value,3),sha(value)))
+            if not self.history_seen.contains(sha(value)):
+                self.c.execute('insert or ignore into inputs(identity,received_ms,raw,raw_sha) values(?,?,?,?)',
+                               (sha(value),at,zlib.compress(value,3),sha(value)))
         if invalidate_state:self.invalidate('INVALID_INPUT:'+reason,at,token)
 
     def stats(self, *, now_ms=None):
