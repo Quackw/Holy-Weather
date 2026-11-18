@@ -8,10 +8,13 @@ process/source binding for any later claim; a new directory is not an upgrade.
 
 The product has exactly two independent notification algorithms: PRICE ALERT and
 LAMP ALERT, sharing data/queue implementation and one Telegram bot. Current
-priority is PRICE qualification. The regional catalogue is PRICE-only: one codebase
+priority is PRICE qualification. The regional catalogue defaults to PRICE: one codebase
 for Europe (11 profiles) and US (10), separate data directories and rule identities.
 Accepted optional US weather/LAMP in the single-contract observer remains intact;
-forecast expansion is deferred.
+European forecast expansion is deferred. The US catalogue's separate
+`us_lamp_enabled` opt-in serves the ten approved US stations through its existing
+writer and queue. Keep source, station, date and contract-scoped LAMP states
+independent. See docs/US_LAMP_CATALOGUE.md. Feature code never authorizes installation.
 
 PRs 1–4, 8–12 and 14–30 are accepted, including queue capacity, local-day rollover,
 notification filtering, regional reconciliation, websockets 17.4, research-bound

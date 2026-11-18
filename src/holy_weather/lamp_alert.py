@@ -19,8 +19,8 @@ def remaining(state,market,at):
     return hours,'OK'
 
 
-def record(store,market,state,at):
-    row=store.c.execute('select value from meta where key=?',(KEY,)).fetchone()
+def record(store,market,state,at,*,key=KEY):
+    row=store.c.execute('select value from meta where key=?',(key,)).fetchone()
     saved=json.loads(row[0]) if row else dict(previous=None,seen=[],threshold=store.cfg.lamp_peak_change_f,last_at=None)
     if saved['threshold']!=store.cfg.lamp_peak_change_f:raise ValueError('LAMP_ALERT_THRESHOLD_CHANGED')
     if saved['last_at'] is not None and at<saved['last_at']:raise ValueError('LAMP_ALERT_CLOCK_REVERSED')
@@ -42,13 +42,14 @@ def record(store,market,state,at):
             boundary=bucket_context(market,None,None);crossed=[]
             if boundary['status']=='VERIFIED':
                 for k in ('lower_f','upper_f'):
+                    if boundary[k] is None:continue
                     x=Decimal(boundary[k])
                     if before<x<=after or after<x<=before:crossed.append(str(x))
             significant=abs(after-before)>=Decimal(saved['threshold'])
             reason='NO_MATERIAL_CHANGE'
             if crossed or significant:
                 weather=weather_context(store.weather_state(),at,at)
-                prices=store.price_context(at)
+                prices=store.price_context(at,market=market)
                 event=dict(type='LAMP_ALERT',track='LAMP',status='DETECTED',
                     reason='BOUNDARY_AND_PEAK_CHANGE' if crossed and significant else 'BOUNDARY_CROSS' if crossed else 'PEAK_CHANGE',
                     previous_peak_f=str(before),future_peak_f=str(after),change_f=str(after-before),
@@ -58,10 +59,11 @@ def record(store,market,state,at):
                     market_url=market['url'],bucket=market['bucket'],station=market['station'],at_ms=at,
                     market_reaction='NOT_ESTABLISHED',trade_signal=False)
                 ident=sha(['LAMP_ALERT_V1',market['condition_id'],body])
-                store.c.execute('insert into events values(?,?,?,?,?,?,?,?)',(ident,state['input_id'],'__LAMP__',at,'LAMP_ALERT','DETECTED',event['reason'],canonical(event)))
+                token=next(iter(market['tokens'].values()))
+                store.c.execute('insert into events values(?,?,?,?,?,?,?,?)',(ident,state['input_id'],token if key!=KEY else '__LAMP__',at,'LAMP_ALERT','DETECTED',event['reason'],canonical(event)))
                 refs={previous['input_id'],state['input_id']}|set(weather.get('input_ids',[]))
                 refs|={q['input_id'] for q in prices.values() if q.get('input_id')}
-                discovery=store.c.execute("select input_id from latest where kind='discovery'").fetchone()
+                discovery=store.discovery_reference(token)
                 if discovery:refs.add(discovery[0])
                 for ref in refs:store.c.execute('insert into event_inputs values(?,?)',(ident,ref))
                 from .alert_queue import enqueue
@@ -69,9 +71,10 @@ def record(store,market,state,at):
                 reason=event['reason']
         elif old_status=='OK':reason='INCOMPARABLE_REMAINING_HOURS'
         saved['previous']=state
-    store.c.execute('insert or replace into meta values(?,?)',(KEY,canonical(saved)))
-    store.c.execute("delete from latest where kind='lamp_alert'")
+    store.c.execute('insert or replace into meta values(?,?)',(key,canonical(saved)))
+    label='__LAMP_ALERT__'+(':'+key if key!=KEY else '')
+    store.c.execute('delete from latest where token=?',(label,))
     if saved['previous']:
-        store.c.execute('insert into latest values(?,?,?)',('__LAMP_ALERT__','lamp_alert',saved['previous']['input_id']))
+        store.c.execute('insert into latest values(?,?,?)',(label,'lamp_alert',saved['previous']['input_id']))
     store.c.execute('insert into diagnostics(received_ms,category,reason) values(?,?,?)',(at,'LAMP_ALERT',reason))
     store.c.execute('delete from diagnostics where id not in (select id from diagnostics order by id desc limit 512)')

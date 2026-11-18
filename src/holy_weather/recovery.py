@@ -76,6 +76,7 @@ class Plan:
 
     def value(self):
         value=dict(config=asdict(self.config),session_day=self.session_day,deadline_ms=self.deadline_ms,phase_seconds=self.phase_seconds,archive_dir=self.archive_dir)
+        if not self.config.us_lamp_enabled:value['config'].pop('us_lamp_enabled',None)
         if self.continuous:value['continuous']=True  # Preserve every old finite plan/hash.
         if self.history_storage is not None:value['history_storage']=self.history_storage.value()
         return value
@@ -197,7 +198,7 @@ def prepare_resume(store,identity,at):
             v=json.loads(raw)
             if v['status']=='UNKNOWN' or v.get('claimed_ms') is not None and v['status']!='SENT':disabled=True
             if v['status'] in ('PENDING','WAITING_BID'):
-                if v.get('track')!='PRICE_ALERT':raise RecoveryStop('RECOVERY_UNEXPECTED_PENDING_TRACK')
+                if v.get('track') not in ('PRICE_ALERT','LAMP_ALERT'):raise RecoveryStop('RECOVERY_UNEXPECTED_PENDING_TRACK')
                 v.update(status='EXPIRED',reason='NO_BACKLOG_ON_RECOVERY',completed_ms=at)
                 store.c.execute('update meta set value=? where key=?',(canonical(v),key))
     return disabled
@@ -226,6 +227,11 @@ def checkpoint(plan,progress):
     if plan.archive_dir is None:return
     from .history import prepare,adopt,digest
     data=Path(plan.config.data_dir);db=data/'monitor.sqlite3'
+    lamp_due=False
+    if plan.config.us_lamp_enabled and plan.history_storage:
+        with closing(sqlite3.connect(db.as_uri()+'?mode=ro',uri=True)) as c:
+            used=c.execute("select coalesce(sum(length(raw)),0) from inputs where identity like 'LAMP:%'").fetchone()[0]
+        lamp_due=used>=3*1024**2//4
     if db.stat().st_size<ARCHIVE_TRIGGER_BYTES and not plan.history_storage:return
     progress('ARCHIVE');parts=Path(plan.archive_dir)
     if parts==data or data in parts.parents or parts in data.parents:raise RecoveryStop('RECOVERY_ARCHIVE_DATA_OVERLAP')
@@ -249,7 +255,7 @@ def checkpoint(plan,progress):
         files=list(parts.rglob('*'))
         if __import__('shutil').disk_usage(data).free<need+plan.history_storage.free_reserve_bytes:
             raise RecoveryStop('RECOVERY_FREE_SPACE')
-        if db.stat().st_size<ARCHIVE_TRIGGER_BYTES:return
+        if db.stat().st_size<ARCHIVE_TRIGGER_BYTES and not lamp_due:return
     if (not plan.history_storage and count>=40) or sum(p.stat().st_size for p in files if p.is_file())+need>budget:
         raise RecoveryStop('RECOVERY_ARCHIVE_BUDGET')
     # After an abrupt writer exit, let SQLite recover committed WAL under its

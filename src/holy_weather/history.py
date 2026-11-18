@@ -154,7 +154,8 @@ def verify_seen_projection(candidate,source):
     """
     before=Seen(source);after=Seen(candidate)
     removed=(bytes.fromhex(row[0]) for row in candidate.execute("""select
-        case when identity like 'GAMMA:%' then substr(identity,7) else identity end as digest
+        case when identity like 'GAMMA:%' then substr(identity,7)
+             when identity like 'LAMP:%' then substr(identity,6) else identity end as digest
         from original.inputs where id not in (select id from main.inputs) order by digest"""))
     def expected():
         previous=None
@@ -265,7 +266,7 @@ def prepare(data_dir,destination,*,expected_sha,cutoff_ms=None,compact_price_inp
                     for ident in q.get('event_ids',[q['event_id']]):c.execute('insert or ignore into keep_events values(?)',(ident,))
                 c.execute("""insert into keep_inputs select id from original.inputs
                     where (? and received_ms>=?) or ((length(identity)!=64 or identity glob '*[^0-9a-f]*')
-                    and (?=0 or identity not like 'GAMMA:%'))""",
+                    and (?=0 or (identity not like 'GAMMA:%' and identity not like 'LAMP:%')))""",
                     (not compact_price_inputs,cutoff,retire_at_ms is not None))
                 c.execute('insert or ignore into keep_inputs select max(id) from original.inputs')
                 c.execute('insert or ignore into keep_inputs select input_id from original.events where id in keep_events')
@@ -298,7 +299,8 @@ def prepare(data_dir,destination,*,expected_sha,cutoff_ms=None,compact_price_inp
                     integer_pk=any(x[5] and x[2].upper()=='INTEGER' for x in info)
                     columns=','.join(names) if integer_pk else 'rowid,'+','.join(names)
                     c.execute('insert into '+table+'('+columns+') select '+columns+' from original.'+table+where+' order by rowid')
-                removed_ids=c.execute("""select case when identity like 'GAMMA:%' then substr(identity,7) else identity end as digest
+                removed_ids=c.execute("""select case when identity like 'GAMMA:%' then substr(identity,7)
+                    when identity like 'LAMP:%' then substr(identity,6) else identity end as digest
                     from original.inputs where id not in keep_inputs order by digest""")
                 if disk_index:
                     reference=write_index(dest,seen.values(),(bytes.fromhex(row[0]) for row in removed_ids),retired_token_hashes(c))

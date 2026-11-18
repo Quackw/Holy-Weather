@@ -117,10 +117,13 @@ Late receipts cannot revise old events. Independent KLGA LAMP ALERT is opt-in:
 configured 2°F peak change or a verified bucket-boundary crossing, comparing the
 same remaining hours. See [LAMP ALERT](docs/LAMP_ALERT.md).
 
-Ten US context profiles exist; they are not a continuously qualified weather
-fleet. European forecast experiments/PR #13 remain deferred on
-`codex/europe-weather-experiments-preserved`. The regional PRICE catalogue rejects
-weather/LAMP flags. Forecast expansion is not a prerequisite for PRICE acceptance.
+The US catalogue has a separate, default-off `us_lamp_enabled` opt-in for original
+NOAA LAMP across its ten stations and validated daily buckets. It reuses the
+regional writer, recovery and Telegram queue. See [US LAMP](docs/US_LAMP_CATALOGUE.md)
+for source bounds, scheduling, expiry and retention. Installed service operation
+still requires separate qualification and deployment approval.
+European forecast experiments/PR #13 remain deferred on
+`codex/europe-weather-experiments-preserved`.
 
 ## Checks and qualification
 

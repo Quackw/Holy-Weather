@@ -63,8 +63,10 @@ Optional KLGA LAMP ALERT is triggered by original new bulletins independently of
 price: configured 2°F peak change or a verified bucket boundary, comparing identical
 remaining UTC hours. METAR, received-observation maximum and future LAMP peak stay
 separate; late receipts cannot revise events. Bounded HTTP workers do not write
-SQLite. The regional catalogue rejects weather/LAMP flags; European source
-experiments remain deferred, not a third alert strategy.
+SQLite. The US catalogue has a default-off `us_lamp_enabled` path using one shared
+NOAA download and station/date/contract-scoped LAMP state. It keeps the existing
+writer and sender. Legacy single-contract flags remain separate. See
+[US LAMP](docs/US_LAMP_CATALOGUE.md). European source experiments remain deferred.
 
 Namespaced PRICE/LAMP queue records retain event IDs, card/contract, expiry and
 explicit outcomes. The filter defaults OFF. When enabled, bid-growing 70/80 is
