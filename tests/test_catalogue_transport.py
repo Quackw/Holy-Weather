@@ -1,6 +1,11 @@
 """Bounded transport evidence and finite recovery; no remote services."""
+from contextlib import contextmanager
 from dataclasses import replace
 import json
+import socket
+from statistics import median
+import threading
+import time
 import pytest
 from holy_weather.catalogue import CatalogueStore,observe_catalogue,Router
 from test_catalogue import setup,AT
@@ -111,7 +116,9 @@ def test_native_queue_backpressure_can_timeout_with_responding_peer():
 def test_unmeasured_native_rtt_is_not_zero():
     from holy_weather.catalogue import native_timing
     class WS:latency=0.0
-    assert native_timing(WS())=={'native_last_pong_ms':None,'native_rtt_ms':None}
+    assert native_timing(WS())=={'native_last_pong_ms':None,'native_rtt_ms':None,
+        'native_receive_queue':{'frames':None,'paused':None,'max_observed_frames':None,
+            'observations':None,'paused_observations':None,'socket_readable_bytes':None}}
 
 
 @pytest.mark.parametrize('code',[1008,1009])
@@ -169,28 +176,272 @@ def test_disconnect_snapshot_has_latest_group_subscription_count(gamma,tmp_path)
     assert error['snapshot']['subscribed_tokens']==22
 
 
-def test_timed_connection_factory_real_handshake_and_native_pong():
-    import socket,threading,time
+@contextmanager
+def socketpair_client(factory):
+    from types import SimpleNamespace
     from websockets.sync.server import ServerConnection
     from websockets.server import ServerProtocol
     from websockets.sync.client import connect
-    from holy_weather.catalogue import TimedClientConnection,native_timing
-    left,right=socket.socketpair()
-    from types import SimpleNamespace
-    server=ServerConnection(right,ServerProtocol(),SimpleNamespace(socket_closed=threading.Event()),ping_interval=None,close_timeout=.1)
-    errors=[]
+
+    left, right = socket.socketpair()
+    server = ServerConnection(right, ServerProtocol(), SimpleNamespace(socket_closed=threading.Event()),
+                              ping_interval=None, close_timeout=.1)
+    errors = []
+
     def handshake():
-        try:server.handshake()
-        except Exception as exc:errors.append(exc)
-    peer=threading.Thread(target=handshake,daemon=True);peer.start()
+        try:
+            server.handshake()
+        except Exception as exc:
+            errors.append(exc)
+
+    peer = threading.Thread(target=handshake, daemon=True)
+    peer.start()
     try:
-        with connect('ws://localhost/qualification',sock=left,proxy=None,create_connection=TimedClientConnection,ping_interval=None,open_timeout=2,close_timeout=.1) as client:
-            peer.join(1);assert not errors and not peer.is_alive()
-            assert isinstance(client,TimedClientConnection)
-            assert client.ping().wait(1)
-            deadline=time.monotonic()+1
-            while client.native_last_pong_ms is None and time.monotonic()<deadline:threading.Event().wait(.001)
-            assert client.native_last_pong_ms is not None
-            assert native_timing(client)['native_rtt_ms'] is not None
+        with connect('ws://localhost/qualification', sock=left, proxy=None, create_connection=factory,
+                     max_queue=16, ping_interval=None, open_timeout=2, close_timeout=.1) as client:
+            peer.join(1)
+            assert not errors and not peer.is_alive()
+            yield client, server
     finally:
-        server.close_socket();peer.join(.5)
+        server.close_socket()
+        left.close()
+        peer.join(.5)
+
+
+def test_timed_connection_factory_real_handshake_and_native_pong():
+    from holy_weather.catalogue import TimedClientConnection, native_timing
+
+    with socketpair_client(TimedClientConnection) as (client, server):
+        assert isinstance(client, TimedClientConnection)
+        assert client.ping().wait(1)
+        deadline = time.monotonic() + 1
+        while client.native_last_pong_ms is None and time.monotonic() < deadline:
+            time.sleep(.001)
+        assert client.native_last_pong_ms is not None
+        assert native_timing(client)['native_rtt_ms'] is not None
+        server.send('unchanged market frame')
+        deadline = time.monotonic() + 1
+        while not getattr(client, 'native_receive_observation', (0, 0, 0))[0] and time.monotonic() < deadline:
+            time.sleep(.001)
+        q = native_timing(client)['native_receive_queue']
+        assert q['frames'] == 1 and q['max_observed_frames'] >= 1 and q['observations'] == 1
+        assert client.recv(timeout=1) == 'unchanged market frame'
+        assert native_timing(client)['native_receive_queue']['frames'] == 0
+
+
+def receiver_fixture(factory):
+    from websockets.sync.messages import Assembler
+
+    client = object.__new__(factory)
+    client.response = object()  # Already handshaken; measure the common data-frame path.
+    client.recv_messages = Assembler(high=16)
+    return client
+
+
+def receiver_cpu_ns(factory, count):
+    from websockets.frames import Frame, TEXT
+
+    client = receiver_fixture(factory)
+    frame = Frame(TEXT, b'bounded synthetic quote')
+    process = client.process_event
+    drain = client.recv_messages.frames.get_nowait
+    began = time.thread_time_ns()
+    for _ in range(count):
+        process(frame)
+        drain()
+    return (time.thread_time_ns() - began) / count
+
+
+def routed_price_cpu_ns(factory, cfg, market, receipt, frames):
+    client = receiver_fixture(factory)
+    with CatalogueStore(cfg, session=False) as store:
+        store.bind(market, receipt)
+        store.connection_started(AT)
+        router = Router(store)
+        began = time.thread_time_ns()
+        for n, frame in enumerate(frames):
+            client.process_event(frame)
+            router.feed(client.recv_messages.get(timeout=0), AT + n + 151)
+        per_frame = (time.thread_time_ns() - began) / len(frames)
+        assert store.c.execute("select count(*) from events where type='PRICE_ALERT'").fetchone()[0] == 1
+        return per_frame, store.c.total_changes
+
+
+def test_receive_queue_measurements_observe_real_backpressure_without_draining(gamma, tmp_path, capsys):
+    from holy_weather.catalogue import TimedClientConnection, native_timing
+    from holy_weather.history import fingerprint
+    from websockets.frames import Frame, TEXT
+    from websockets.sync.client import ClientConnection
+
+    cfg, markets = setup(gamma, tmp_path, 1)
+    market, receipt = markets[0]
+    token = market['tokens']['YES']
+    frames = [message(market, token, '0.49' if n < 20 else '0.51', AT + n + 1) for n in range(32)]
+    outputs = []
+    waits = []
+    paused = None
+    for factory in (ClientConnection, TimedClientConnection):
+        measured = factory is TimedClientConnection
+        with socketpair_client(factory) as (client, peer):
+            began = time.monotonic_ns()
+            for raw in frames[:17]:
+                peer.send(raw)
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                if client.recv_messages.paused and (not measured or client.native_receive_observation[1]):
+                    break
+                time.sleep(.001)
+            assert client.recv_messages.paused
+            for raw in frames[17:]:
+                peer.send(raw)
+            time.sleep(.1)
+            if measured:
+                paused = native_timing(client)['native_receive_queue']
+                assert paused['paused'] and paused['frames'] == paused['max_observed_frames'] == 17
+                assert paused['observations'] == 17 and paused['paused_observations'] >= 1
+                assert paused['socket_readable_bytes'] > 0
+            first = client.recv(timeout=1)
+            waits.append((time.monotonic_ns() - began) / 1e6)
+            assert waits[-1] >= 100
+            received = [first, *(client.recv(timeout=1) for _ in frames[1:])]
+            assert received == frames
+            if measured:
+                q = native_timing(client)['native_receive_queue']
+                assert q['frames'] == q['socket_readable_bytes'] == 0 and not q['paused']
+
+        run_cfg = replace(cfg, data_dir=str(tmp_path / factory.__name__))
+        with CatalogueStore(run_cfg, session=False) as store:
+            store.bind(market, receipt)
+            store.connection_started(AT)
+            router = Router(store)
+            for n, raw in enumerate(received):
+                # Use the same clocks in both slices so every PRICE row can be compared.
+                router.feed(raw, AT + n + 151)
+            store.transport_record(snapshot={'native_receive_queue': paused} if measured else {})
+            rows = fingerprint(store.c)
+            del rows['meta']
+            meta = list(store.c.execute("select key,value from meta where key!='catalogue_transport_v1' order by key"))
+            outputs.append((rows, [tuple(r) for r in meta], store.c.total_changes))
+            event, = store.c.execute("select input_id,payload from events where type='PRICE_ALERT'").fetchall()
+            assert json.loads(event['payload'])['thresholds'] == ['0.50']
+            source, received = store.c.execute('select source_ms,received_ms from samples where input_id=?',
+                                               (event['input_id'],)).fetchone()
+            assert received - source == 150
+            assert store.c.execute('pragma integrity_check').fetchone()[0] == 'ok'
+            assert not store.c.execute('pragma foreign_key_check').fetchall()
+    assert outputs[0] == outputs[1]
+
+    # Paired measurements report the cost without a scheduler-dependent test threshold.
+    count = 20_000
+    receiver = {factory: [] for factory in (ClientConnection, TimedClientConnection)}
+    routed = {factory: [] for factory in receiver}
+    writes = {factory: [] for factory in receiver}
+    load = [Frame(TEXT, message(market, token, '0.49' if n < 20 else '0.51', AT + n + 1).encode())
+            for n in range(2_000)]
+    for round_no, pair in enumerate(((ClientConnection, TimedClientConnection),
+                                     (TimedClientConnection, ClientConnection)) * 3):
+        for factory in pair:
+            receiver[factory].append(receiver_cpu_ns(factory, count))
+            bench_cfg = replace(cfg, data_dir=str(tmp_path / f'{factory.__name__}-{round_no}'))
+            use, changes = routed_price_cpu_ns(factory, bench_cfg, market, receipt, load)
+            routed[factory].append(use)
+            writes[factory].append(changes)
+    assert writes[ClientConnection] == writes[TimedClientConnection]
+    plain, measured = (median(receiver[c]) for c in (ClientConnection, TimedClientConnection))
+    plain_route, measured_route = (median(routed[c]) for c in (ClientConnection, TimedClientConnection))
+    with capsys.disabled():
+        print('\nWS_BACKLOG_PROOF ' + json.dumps({'wire_frames_each': len(frames), 'first_read_ms': [round(x, 2) for x in waits],
+            'paused_queue': paused, 'same_price_tables_and_write_count': True, 'price_events_each': 1,
+            'source_to_receipt_ms_on_test_clock': 150, 'receiver_frames_per_mode': count * 6,
+            'plain_cpu_ns_per_frame': round(plain, 1), 'instrumented_cpu_ns_per_frame': round(measured, 1),
+            'extra_cpu_ns_per_frame': round(measured-plain, 1), 'routed_frames_per_mode': len(load) * 6,
+            'plain_price_cpu_us_per_frame': round(plain_route / 1000, 2),
+            'instrumented_price_cpu_us_per_frame': round(measured_route / 1000, 2)}, sort_keys=True))
+
+
+def test_unread_socket_measurement_does_not_consume_bytes_or_turn_missing_into_zero():
+    import socket
+    from types import SimpleNamespace
+    from holy_weather.catalogue import socket_readable_bytes
+    left,right=socket.socketpair()
+    try:
+        right.sendall(b'original')
+        assert socket_readable_bytes(SimpleNamespace(socket=left))==8
+        assert left.recv(8)==b'original'
+        assert socket_readable_bytes(SimpleNamespace(socket=left))==0
+    finally:left.close();right.close()
+    assert socket_readable_bytes(SimpleNamespace(socket=left)) is None
+    assert socket_readable_bytes(SimpleNamespace()) is None
+
+
+def test_receive_observation_is_bounded_and_optional_faults_do_not_break_frames(monkeypatch):
+    from types import SimpleNamespace
+    from holy_weather.catalogue import native_timing,sample_receive_queue,TimedClientConnection
+    from websockets.sync.client import ClientConnection
+    from websockets.frames import Frame,TEXT
+    import queue
+    frames=queue.SimpleQueue();frames.put('retained')
+    ws=SimpleNamespace(recv_messages=SimpleNamespace(frames=frames,paused=True))
+    for _ in range(6000):sample_receive_queue(ws)
+    q=native_timing(ws)['native_receive_queue']
+    assert q['observations']==6000 and q['paused_observations']==6000 and q['max_observed_frames']==1
+    assert len(json.dumps(q))<256 and frames.get_nowait()=='retained'
+    ws.native_receive_observation=(2**63-1,2**63-1,1)
+    sample_receive_queue(ws)
+    assert ws.native_receive_observation==(2**63-1,2**63-1,1)
+    class Unavailable:
+        def qsize(self):raise RuntimeError('private exception text must not enter diagnostics')
+    instrumented=object.__new__(TimedClientConnection)
+    instrumented.recv_messages=SimpleNamespace(frames=Unavailable(),paused=True)
+    delivered=[]
+    monkeypatch.setattr(ClientConnection,'process_event',lambda self,event:delivered.append(event))
+    frame=Frame(TEXT,b'original payload')
+    instrumented.process_event(frame)
+    assert delivered==[frame]
+    q=native_timing(instrumented)['native_receive_queue']
+    assert q['frames'] is None and q['paused'] is None and 'private' not in json.dumps(q)
+
+
+def test_previous_reader_keeps_new_metrics_events_and_receipts(gamma,tmp_path):
+    from dataclasses import asdict
+    import os,subprocess,sys
+    from pathlib import Path
+    from holy_weather.alert_queue import preview,claim,finish
+    from test_catalogue import feed
+    cfg,markets=setup(gamma,tmp_path,1);m,receipt=markets[0]
+    metrics={'native_receive_queue':{'frames':17,'paused':True,'max_observed_frames':18,
+        'observations':6000,'paused_observations':9,'socket_readable_bytes':32}}
+    with CatalogueStore(cfg) as store:
+        store.bind(m,receipt);store.connection_started(AT);router=Router(store)
+        feed(router,m,'0.49',AT+1);feed(router,m,'0.81',AT+2)
+        key=store.c.execute("select key from meta where key like 'alert_delivery_v1:%'").fetchone()[0]
+        card=preview(store,key);assert claim(store,card,AT+3)
+        finish(store,card,{'status':'SENT','message_id':10},AT+4)
+        store.transport_record({'kind':'CONNECTING','at_ms':AT+5},metrics)
+        before={'events':[tuple(x) for x in store.c.execute('select * from events order by id')],
+                'state':[tuple(x) for x in store.c.execute("select key,value from meta where key like 'price_alert_v1:%' or key like 'alert_delivery_v1:%' order by key")]}
+        count=store.c.execute('select count(*) from inputs').fetchone()[0]
+    old=tmp_path/'previous';base='77d5e3a45d6b23aeb136e51e3cf3a05217e1d878'
+    names=subprocess.check_output(['git','ls-tree','-r','--name-only',base,'src/holy_weather'],text=True).splitlines()
+    for name in names:
+        if not name.endswith('.py'):continue
+        dest=old/Path(name).relative_to('src');dest.parent.mkdir(parents=True,exist_ok=True)
+        dest.write_bytes(subprocess.check_output(['git','show',base+':'+name]))
+    script="""import json,sys
+from holy_weather.catalogue import CatalogueConfig,CatalogueStore
+v=json.loads(sys.argv[1]);v['levels']=tuple(v['levels'])
+with CatalogueStore(CatalogueConfig(**v),session=False) as s:
+ assert s.transport_record()['snapshot']==json.loads(sys.argv[2])
+ s.reject({'fixture':'old runtime after new metrics'},'TEST',int(sys.argv[3]),invalidate_state=False)
+ assert s.c.execute('pragma integrity_check').fetchone()[0]=='ok'
+ assert not s.c.execute('pragma foreign_key_check').fetchall()
+ assert s.c.execute('pragma user_version').fetchone()[0]==1
+ print(json.dumps({'events':[tuple(x) for x in s.c.execute('select * from events order by id')],
+ 'state':[tuple(x) for x in s.c.execute(\"select key,value from meta where key like 'price_alert_v1:%' or key like 'alert_delivery_v1:%' order by key\")]}))
+"""
+    env=dict(os.environ,PYTHONPATH=str(old),PYTHONDONTWRITEBYTECODE='1')
+    result=json.loads(subprocess.check_output([sys.executable,'-B','-c',script,json.dumps(asdict(cfg)),json.dumps(metrics),str(AT+6)],env=env,text=True))
+    assert result==json.loads(json.dumps(before))
+    with CatalogueStore(cfg,session=False) as store:
+        assert store.c.execute('select count(*) from inputs').fetchone()[0]==count+1
+        assert store.transport_record()['snapshot']==metrics

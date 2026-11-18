@@ -101,3 +101,56 @@ data. Never restore an older database or reset threshold/delivery state.
 
 The PRICE detector is byte-identical to accepted main (SHA256
 `6b3e6ddc6df99618c0ab3edd8a70f3cf71c334b77dee11c4b15c8341b1786862`).
+
+## Receive-backlog measurements
+
+The existing receiver hook additionally samples its assembler queue after data
+frames. Only three scalar counters are retained: number of observations, paused
+observations and maximum observed queue depth. Counts saturate at signed 64-bit
+maximum. Counters are published together as one immutable tuple. No frame
+payload, extra queue, database writer or per-frame diagnostic
+record is added. Native protocol PONG remains separate from text/application PONG.
+
+`native_receive_queue` joins the existing ten-second/transition snapshot with:
+
+- `frames`: approximate current queue entries, possibly including an EOF marker
+  at close; this is not a count of market messages or tokens;
+- `max_observed_frames`: highest sampled depth since this connection started;
+- `paused`: whether the assembler has paused socket reads at the sampled instant;
+- `observations` / `paused_observations`: data-frame observations, not duration;
+- `socket_readable_bytes`: unread kernel socket bytes from read-only FIONREAD.
+
+The last field does not consume socket data. It is not a TLS plaintext byte
+count and does not include data already buffered inside TLS or the assembler.
+Unavailable/closed/unsupported measurements are null, never an invented zero.
+Measurement failures do not fail frame handling or collection.
+
+Queue depth and pause are concurrent observations, not an atomic snapshot or a
+proof of total outage duration. A high depth, paused reads or growing
+source-to-processing delay can support a backlog investigation. They cannot by
+themselves distinguish every provider/network/client cause or prove a causal
+link to a historical timeout. Empty snapshots do not disprove an earlier burst.
+The existing `max_queue=16` is a high watermark; a batch parsed from one socket
+read can temporarily enqueue more frames. Measurement does not change that limit.
+
+The bounded 32-transition record and normal snapshot cadence are unchanged.
+Existing databases keep schema v1 and metadata readers ignore the new nested
+fields. Reverting this measurement change preserves data and removes only its
+observability. No heartbeat, receive watermark, freshness limit, alert, delivery,
+service, retention policy or dependency changes. Actual observation of these
+new fields requires a separately approved runtime switch; offline tests cannot
+prove the cause of an existing production incident.
+
+### Offline comparison
+
+Run `python -m pytest -q tests/test_catalogue_transport.py -k receive_queue_measurements`.
+The local socket pair carries the same 32 PRICE frames with and without the
+receiver hook. The consumer pauses for at least 100 ms. The test observes the
+paused queue and unread bytes, drains every frame in order, and compares PRICE
+rows, evidence, thresholds, delivery records and the SQLite write count. The
+fixture clocks give the crossing a fixed 150 ms source-to-receipt delay.
+
+The `WS_BACKLOG_PROOF` line reports wall time until the first read and paired
+median CPU costs from 120,000 receiver frames and 12,000 routed PRICE frames per
+mode. The cost measurements describe this workload. The queue fields indicate
+build-up and pause, while per-frame delay is calculated from the two clocks.

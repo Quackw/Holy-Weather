@@ -20,10 +20,48 @@ DAY_PREFIX = 'price_catalogue_day_v1:'
 DAY_REFUSAL_PREFIX = 'price_catalogue_day_refusal_v1:'
 
 
-# The library already owns the receiver thread. It only updates two scalar
-# clocks here; the main thread remains the sole SQLite writer.
+# The library owns the receiver thread. It publishes bounded timing and queue
+# observations. The main thread remains the sole SQLite writer.
 from websockets.sync.client import ClientConnection
-from websockets.frames import Frame,PONG
+from websockets.frames import Frame,PONG,DATA_OPCODES
+
+def receive_queue_state(ws):
+    """Approximate read-only queue observation; unavailable isn't an empty queue."""
+    try:
+        assembler=ws.recv_messages
+        depth=assembler.frames.qsize();paused=assembler.paused
+        if type(depth) is not int or not 0<=depth<2**63 or type(paused) is not bool:return None
+        return {'frames':depth,'paused':paused}
+    except Exception:
+        # Optional measurement must never fail market collection. No exception
+        # text, payload or credential is retained by this path.
+        return None
+
+
+def sample_receive_queue(ws):
+    """Receiver-local scalars only: no second queue, SQLite or payload retention."""
+    state=receive_queue_state(ws)
+    if state is None:return
+    try:
+        observations,pauses,maximum=getattr(ws,'native_receive_observation',(0,0,0))
+        # Publish one immutable tuple, so the main thread reads one generation
+        # of the receiver's counters. Current queue depth is sampled separately.
+        ws.native_receive_observation=(min(observations+1,2**63-1),
+            min(pauses+int(state['paused']),2**63-1),max(maximum,state['frames']))
+    except Exception:
+        return
+
+
+def socket_readable_bytes(ws):
+    """Unread kernel socket bytes, not messages or TLS plaintext; never recv()."""
+    try:
+        import array,fcntl,termios
+        value=array.array('i',[0])
+        fcntl.ioctl(ws.socket.fileno(),termios.FIONREAD,value,True)
+        return value[0] if value[0]>=0 else None
+    except Exception:
+        return None
+
 
 class TimedClientConnection(ClientConnection):
     native_last_pong_ms=None
@@ -31,12 +69,21 @@ class TimedClientConnection(ClientConnection):
         super().process_event(event)
         if isinstance(event,Frame) and event.opcode is PONG:
             self.native_last_pong_ms=time.time_ns()//1_000_000
+        elif isinstance(event,Frame) and event.opcode in DATA_OPCODES:
+            sample_receive_queue(self)
 
 
 def native_timing(ws):
     latency=getattr(ws,'latency',None)
+    state=receive_queue_state(ws)
+    observations,pauses,maximum=getattr(ws,'native_receive_observation',(None,None,None))
     return {'native_last_pong_ms':getattr(ws,'native_last_pong_ms',None),
-            'native_rtt_ms':round(latency*1000,3) if isinstance(latency,(int,float)) and latency>0 else None}
+            'native_rtt_ms':round(latency*1000,3) if isinstance(latency,(int,float)) and latency>0 else None,
+            'native_receive_queue':{
+                'frames':None if state is None else state['frames'],
+                'paused':None if state is None else state['paused'],
+                'max_observed_frames':maximum,'observations':observations,'paused_observations':pauses,
+                'socket_readable_bytes':socket_readable_bytes(ws)}}
 
 
 def local_days(at, cities=None):
