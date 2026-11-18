@@ -186,20 +186,33 @@ def preflight(plan):
         finally:c.close()
 
 
-def prepare_resume(store,identity,at):
-    """Single writer; expire old PRICE work, keep UNKNOWN/SENT and fired levels."""
+def prepare_resume(store,identity,at,*,carry_pending_price=False):
+    """Keep only eligible, unclaimed PRICE work across a clean window handoff."""
     disabled=False
     with store.transaction():
         previous=store.c.execute("select value from meta where key='price_recovery_control_v1'").fetchone()
         if previous and json.loads(previous[0])!=identity:raise RecoveryStop('RECOVERY_CONTROL_BINDING')
         store.c.execute("insert or ignore into meta values('price_recovery_control_v1',?)",(canonical(identity),))
-        for key,raw in store.c.execute("select key,value from meta where key like 'alert_delivery_v1:%'").fetchall():
+        pending=[]
+        for key,raw in store.c.execute("select key,value from meta where key like 'alert_delivery_v1:%'"):
             v=json.loads(raw)
             if v['status']=='UNKNOWN' or v.get('claimed_ms') is not None and v['status']!='SENT':disabled=True
             if v['status'] in ('PENDING','WAITING_BID'):
                 if v.get('track')!='PRICE_ALERT':raise RecoveryStop('RECOVERY_UNEXPECTED_PENDING_TRACK')
-                v.update(status='EXPIRED',reason='NO_BACKLOG_ON_RECOVERY',completed_ms=at)
-                store.c.execute('update meta set value=? where key=?',(canonical(v),key))
+                pending.append((key,v))
+        for key,v in pending:
+            if (carry_pending_price and not disabled and v['status']=='PENDING'
+                    and v.get('confirmation') is None and v.get('delivery_notes') is None
+                    and v['event_ms']<=at<=v['expires_ms']):
+                event=store.c.execute("select token from events where id=? and type='PRICE_ALERT'",(v['event_id'],)).fetchone()
+                if event:
+                    market=store.market_for_token(event[0])
+                    if (market['date']==v['market_date'] and market['timezone']==v['timezone']
+                            and store.active(market['condition_id'].lower(),at)):
+                        # DayDiscovery revalidates the contract before the sender runs.
+                        continue
+            v.update(status='EXPIRED',reason='NO_BACKLOG_ON_RECOVERY',completed_ms=at)
+            store.c.execute('update meta set value=? where key=?',(canonical(v),key))
     return disabled
 
 
@@ -279,7 +292,7 @@ def frozen_discover(plan,city):
 def worker(root,nonce,token,guard_fd=None):
     saved=json.loads((root/'plan.json').read_text());plan=Plan.load(saved['plan'])
     if saved['code']!=code_identity():raise RecoveryStop('RECOVERY_CODE_DRIFT')
-    if plan.continuous:lifecycle.claim_child(root,nonce,guard_fd,saved,write)
+    carry_pending_price=plan.continuous and lifecycle.claim_child(root,nonce,guard_fd,saved,write)
     stop=threading.Event()
     for sig in (signal.SIGTERM,signal.SIGINT):signal.signal(sig,lambda *_:stop.set())
     timer=threading.Timer(max(0,(plan.deadline_ms-time.time_ns()//1000000)/1000),stop.set) if plan.deadline_ms is not None else None
@@ -296,7 +309,8 @@ def worker(root,nonce,token,guard_fd=None):
             else:
                 cfg=replace(plan.config,duration_seconds=min(plan.phase_seconds,int(remaining)))
                 with CatalogueStore(cfg,session=False) as store:
-                    disabled=prepare_resume(store,saved['identity'],time.time_ns()//1000000)
+                    disabled=prepare_resume(store,saved['identity'],time.time_ns()//1000000,
+                        carry_pending_price=carry_pending_price)
                 cfg=replace(cfg,telegram_enabled=cfg.telegram_enabled and not disabled)
                 def sender_status(value):
                     delivery.update(value)
@@ -359,6 +373,7 @@ def supervise(plan,control_dir,*,token=None,stop=None,clock=None,monotonic=time.
         write(root,'plan.json',saved_plan)
         mono_deadline=float('inf') if plan.deadline_ms is None else monotonic()+max(0,(plan.deadline_ms-clock())/1000)
         retry=bool(state.get('retry'));child=None
+        carry_pending_price=False
         def health():
             if on_health:on_health({k:state[k] for k in ('status','telegram_enabled','telegram_disabled_reason') if k in state})
         def save(status):
@@ -394,8 +409,11 @@ def supervise(plan,control_dir,*,token=None,stop=None,clock=None,monotonic=time.
                 if ended():state['retry']=False;break
                 if binding is not None and binding!=identity:raise RecoveryStop('RECOVERY_CONTROL_BINDING')
                 nonce=uuid.uuid4().hex;entry=dict(nonce=nonce,at_ms=clock(),recovery=retry)
-                if plan.continuous:entry['guard_protocol']=lifecycle.PROTOCOL
+                if plan.continuous:
+                    entry['guard_protocol']=lifecycle.PROTOCOL
+                    if carry_pending_price:entry['carry_pending_price']=True
                 elif retry:state['restarts'].append(clock())
+                carry_pending_price=False
                 state['attempts'].append(entry);state['active']=nonce;state.pop('next_ms',None)
                 # The paid recovery belongs to this durable launch intent. Keep
                 # it through BACKOFF, but never let an interrupted spawn reuse it.
@@ -444,6 +462,9 @@ def supervise(plan,control_dir,*,token=None,stop=None,clock=None,monotonic=time.
                 if result:sender_status(result)
                 entry.update(state=outcome,returncode=returncode,finished_ms=clock(),error=result.get('error') if result else None,reason=result.get('reason') if result else None);state.update(active=None,retry=retry)
                 child=None;save(outcome)
+                # Authorize only the next guarded launch in this controller run.
+                carry_pending_price=(plan.continuous and requested is None and returncode==0
+                                     and outcome=='COMPLETED_WINDOW' and not entry['error'])
                 if requested=='STOP':break
                 if outcome=='COMPLETED_WINDOW' or plan.continuous and outcome in ('NO_VERIFIED_CURRENT_MARKETS','ALL_MARKETS_CLOSED_OR_LOCAL_DATE_ENDED'):
                     if plan.continuous and outcome!='COMPLETED_WINDOW':wait(min(30,max(0,mono_deadline-monotonic())))
