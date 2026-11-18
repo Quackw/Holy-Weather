@@ -85,7 +85,8 @@ def immutable_rows(s):
 
 
 @pytest.mark.parametrize('base',['81d00eed40ee179481822001f693a544d0fa2d29',
-                                '9adf061e412f73246cb7d83dffb30ead68792e24'])
+                                '9adf061e412f73246cb7d83dffb30ead68792e24',
+                                '2dcbae183784e7d49a736da18a2508d125d7750e'])
 def test_current_data_forward_and_old_code_rollback_after_new_rows(gamma,tmp_path,identity,base):
     finite,m=seed(gamma,tmp_path);root,state=prepared(tmp_path,finite,active=False,status='STOPPED')
     r.write(root,'plan.json',dict(plan=finite.value(),identity=state['identity'],code=state['identity']['code']))
@@ -108,7 +109,7 @@ def test_current_data_forward_and_old_code_rollback_after_new_rows(gamma,tmp_pat
         feed(router,m,'0.75',AT+8);feed(router,m,'0.81',AT+9)
         rows=immutable_rows(s)
         assert len(rows['events'])>1
-    # Extract accepted 81d00ee source locally; no GitHub/network/production access.
+    # Extract exact prior source locally; no GitHub/network/production access.
     old=tmp_path/'old';old.mkdir()
     names=subprocess.check_output(['git','ls-tree','-r','--name-only',base,'src/holy_weather'],text=True).splitlines()
     for name in names:

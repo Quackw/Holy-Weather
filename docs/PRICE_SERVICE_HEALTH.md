@@ -58,11 +58,14 @@ systemd probe uses an isolated dummy credential, synthetic market/receipts and n
 external network. Its watchdog is shortened to five seconds for a finite test:
 a blocked controller times out while its worker was alive, recovers after durable
 backoff and preserves events, fired thresholds and SENT/UNKNOWN. A PENDING card
-expires explicitly under the existing no-backlog policy. Second writers/controllers
+expires explicitly under the existing no-backlog policy. The history-disk outage
+fixture checks that collection remains on the primary spool across watchdog
+recovery. Second writers/controllers
 are refused; the existing SIGKILL crash and manual-stop tests remain.
 
 These are controlled failure tests, not a live Netcup stall or real delivery.
-The accepted prior `9adf061` source is also checked against newly written data.
+The prior `9adf061` and deployed `2dcbae1` sources are checked against newly
+written data in the bounded rollback fixture.
 A future operational rollback must restore the matching old unit **and** code:
 the old binary cannot feed the new watchdog. It requires clean ownership, a new
 verified reserve and explicit current-data rebind; it never rewinds the database.

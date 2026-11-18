@@ -102,6 +102,8 @@ class CatalogueStore(Store):
         saved=self.c.execute('select value from meta where key=?',(PREFIX+condition,)).fetchone()
         prior=json.loads(saved[0]) if saved else None
         if prior and prior!=market:raise StorageStop('MARKET_IDENTITY_OR_RULE_DRIFT')
+        if prior is None and any(self.history_seen.contains(sha(['RETIRED_PRICE_TOKEN_V1',token])) for token in market['tokens'].values()):
+            raise StorageStop('RETIRED_CATALOGUE_TOKEN_REUSE')
         if condition not in self.markets and len(self.markets)>=MAX_MARKETS:
             raise StorageStop('CATALOGUE_MARKET_BOUND')
         if any(self.c.execute("select 1 from meta where key like ? and key!=? and (json_extract(value,'$.tokens.YES')=? or json_extract(value,'$.tokens.NO')=?) limit 1",
@@ -155,6 +157,10 @@ class CatalogueStore(Store):
                            quote_clock_status(self.cfg,previous['source_ms'],previous['received_ms'],at)=='FRESH')
                 v['fresh_quotes']+=int(fresh);v['price_ready']+=int(ready)
         sent=self.c.execute("select max(json_extract(value,'$.completed_ms')) from meta where key like 'alert_delivery_v1:%' and json_extract(value,'$.status')='SENT'").fetchone()[0]
+        archived=self.c.execute("select value from meta where key='history_retired_counts_v1'").fetchone()
+        if archived:
+            cold_sent=json.loads(archived[0]).get('last_sent_ms')
+            if cold_sent is not None:sent=max(sent or 0,cold_sent)
         return dict(observed_ms=at,connected=self.connected,cities=cities,last_sent_ms=sent)
 
     def retire(self, at):
@@ -389,7 +395,7 @@ class DayDiscovery:
 
 def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=None, token=None,
                       clock=None, monotonic=time.monotonic, stop=None, wait=None, progress=None, session_day=None,
-                      on_sender_status=None):
+                      on_sender_status=None,rotate_bytes=None):
     """Finite session with local-day revalidation; no service or extended deadline."""
     import threading
     from websockets.exceptions import WebSocketException
@@ -399,6 +405,8 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
     if connect is None:
         from websockets.sync.client import connect
     clock=clock or millis;stop=stop or threading.Event();wait=wait or stop.wait
+    if rotate_bytes is not None and (type(rotate_bytes) is not int or not 8*1024**2<=rotate_bytes<=cfg.storage_bytes-32*1024**2):
+        raise ValueError('CATALOGUE_ROTATION_BOUND')
     if cfg.telegram_enabled and not token:raise ValueError('EXPLICIT_TELEGRAM_TOKEN_REQUIRED')
     sender=Sender(token,**({'transport':transport} if transport else {}),minimum_interval_ms=3100) if cfg.telegram_enabled else None
     result={'cities':{},'state':'PREPARING','telegram_enabled':cfg.telegram_enabled,'weather_enabled':False}
@@ -467,6 +475,8 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
                         while not stop.is_set() and monotonic()<deadline:
                             progress('OBSERVING')
                             at=clock()
+                            if rotate_bytes is not None and store.usage()>=rotate_bytes:
+                                result['rotation_reason']='STORAGE_CHECKPOINT_DUE';break
                             if days.due():break
                             if subscribed<len(tokens) and monotonic()>=next_subscription:
                                 batch=[t for t in tokens[subscribed:subscribed+16] if store.active(store.tokens[t],at)]
@@ -550,6 +560,7 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
                         result['state']='DEADLINE_DURING_GAP';break
                     continue
                 else:
+                    if result.get('rotation_reason'):break
                     if days.due() or not any(store.active(c,clock()) for c in selected):continue
                     break
             progress('STOPPING')
@@ -563,6 +574,11 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
             result['counters']={'router':dict(router.counters),'markets':{k:dict(v) for k,v in router.per_market.items()}}
             result['price_events']=store.c.execute("select count(*) from events where type='PRICE_ALERT'").fetchone()[0]
             result['deliveries']={r[0]:r[1] for r in store.c.execute("select json_extract(value,'$.status'),count(*) from meta where key like 'alert_delivery_v1:%' group by 1")}
+            archived=store.c.execute("select value from meta where key='history_retired_counts_v1'").fetchone()
+            if archived:
+                counts=json.loads(archived[0]);result['archived_price_events']=counts['price_events']
+                result['price_events']+=counts['price_events']
+                for status,count in counts['deliveries'].items():result['deliveries'][status]=result['deliveries'].get(status,0)+count
             result['sqlite_integrity']=store.c.execute('pragma integrity_check').fetchone()[0]
             result['foreign_key_errors']=len(store.c.execute('pragma foreign_key_check').fetchall())
             result['data_bytes']=store.usage()

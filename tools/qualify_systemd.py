@@ -20,10 +20,11 @@ if len(sys.argv)>1 and sys.argv[1]=='worker':
  l.claim_child(root,nonce,fd,saved,r.write)
  stop=threading.Event();signal.signal(signal.SIGTERM,lambda *_:stop.set())
  token=sys.stdin.readline().strip();assert token.startswith('123456:')
+ progress=r.Progress(root,nonce)
+ r.checkpoint(plan,progress)
  with CatalogueStore(plan.config,session=False) as s:
   disabled=r.prepare_resume(s,saved['identity'],time.time_ns()//1000000)
   s.set_meta('systemd_offline_probe',{'pid':os.getpid()})
-  progress=r.Progress(root,nonce)
   progress.sender_status(dict(telegram_enabled=not disabled,telegram_disabled_reason='PREVIOUS_SEND_UNCONFIRMED' if disabled else None))
   base=root.parent;ticks=0
   while not stop.wait(.1):
@@ -113,6 +114,7 @@ def main():
     from dataclasses import replace
     from holy_weather.catalogue import CatalogueStore,Router
     from holy_weather.recovery import Plan
+    from holy_weather.history_files import HistoryStorage
     base=Path(tempfile.mkdtemp(prefix='holy-weather-systemd-',dir=os.environ['RUNNER_TEMP']));base.chmod(0o700)
     root=Path(__file__).resolve().parents[1];unit_name='holy-weather-offline-'+str(os.getpid())+'.service'
     probe=base/'probe.py';probe.write_text(PROBE);probe.chmod(0o600)
@@ -130,12 +132,13 @@ def main():
         key=s.c.execute("select key from meta where key like 'alert_delivery_v1:%'").fetchone()[0]
         card=preview(s,key);assert claim(s,card,AT+3)
         finish(s,card,dict(status='SENT',message_id=701),AT+4)  # Synthetic receipt only.
-    plan=Plan(cfg,None,None,continuous=True)
+    plan=Plan(cfg,None,None,continuous=True,archive_dir=str(base/'archive'),
+              history_storage=HistoryStorage(str(base/'absent-history-disk')))
     (base/'plan.json').write_text(json.dumps(plan.value()));(base/'plan.json').chmod(0o600)
     encrypted=base/'telegram.encrypted'
     command('/usr/bin/systemd-creds','encrypt','--with-key=host','--name=telegram','-',str(encrypted),input='123456:'+'offline_test_only_'*3)
     template=(root/'deploy/holy-weather-price@.service.in').read_text()
-    unit=template.replace('@RELEASE@',str(base)).replace('User=polymeteo-agent','User=root')
+    unit=template.replace('@RELEASE@',str(base)).replace('@HISTORY_PATHS@','ReadWritePaths=-'+str(base/'absent-history-disk')).replace('User=polymeteo-agent','User=root')
     unit=unit.replace('WorkingDirectory='+str(base),'WorkingDirectory='+str(root))
     unit=unit.replace(str(base)+'/venv/bin/python -B -m holy_weather.service',sys.executable+' -B '+str(probe))
     unit=unit.replace('/etc/holy-weather/%i.json',str(base/'plan.json')).replace('/var/lib/holy-weather/%i/control',str(base/'control'))
@@ -152,7 +155,9 @@ def main():
         command('/usr/bin/systemd-analyze','verify',str(unit_path));report['unit_verify']='PASS'
         command('/usr/bin/systemctl','daemon-reload');command('/usr/bin/systemctl','start',unit_name)
         path=base/'control/state.json'
-        first=await_state(path,lambda s:observing(base/'control',s) and s.get('telegram_enabled') is True)
+        first=await_state(path,lambda s:observing(base/'control',s) and s.get('telegram_enabled') is True
+                          and s.get('storage',{}).get('status')=='SPOOLING')
+        report['history_disk_absent_primary_collection']='PASS'
         # Longer than the test watchdog: quiet market is not a controller stall.
         time.sleep(6)
         assert command('/usr/bin/systemctl','is-active',unit_name)=='active'
@@ -187,8 +192,13 @@ def main():
         assert second['telegram_disabled_reason']=='PREVIOUS_SEND_UNCONFIRMED'
         after=snapshot(data)
         assert before['events']==after['events'] and before['fired']==after['fired']
+        assert before['delivery'].keys()==after['delivery'].keys()
         assert all(after['delivery'][k]==v for k,v in terminal.items())
-        assert sum(json.loads(v)['status']=='EXPIRED' for v in after['delivery'].values())==1
+        pending,=[k for k,v in before['delivery'].items() if json.loads(v)['status']=='PENDING']
+        expired=json.loads(after['delivery'][pending])
+        assert expired['status']=='EXPIRED' and expired['reason']=='NO_BACKLOG_ON_RECOVERY'
+        assert expired.get('claimed_ms') is None
+        assert second['storage']['status']=='SPOOLING'
         report.update(controller_watchdog_recovery='PASS',no_second_writer='PASS',
                       receipts_and_thresholds='PASS',no_duplicate_claims='PASS',
                       watchdog_backoff_ms=second['attempts'][-1]['at_ms']-second['restarts'][0])
