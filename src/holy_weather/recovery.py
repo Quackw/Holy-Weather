@@ -98,9 +98,29 @@ def private(path,directory=False):
     if directory!=path.is_dir():raise RecoveryStop('RECOVERY_PATH_TYPE')
 
 
+def control_bytes(root,excluded):
+    """Bounded read-only rescan when another owner's atomic temp is replaced."""
+    for _ in range(5):
+        total=0
+        for path in root.iterdir():
+            if path.name in excluded:continue
+            try:total+=path.stat().st_size
+            except FileNotFoundError:
+                known=re.fullmatch(r'\.(?:(?:state|plan|rotation|service-stop)\.json|[0-9a-f]{32}\.(?:owner|progress|result)\.json)\.tmp',path.name)
+                if not known:raise
+                destination=root/path.name[1:-4]
+                private(destination)
+                if not destination.is_file():raise RecoveryStop('RECOVERY_CONTROL_REPLACEMENT_TYPE')
+                # Recount the destination and every other file together. Skipping
+                # the missing temp could omit a newly published file from budget.
+                break
+        else:return total
+    raise RecoveryStop('RECOVERY_CONTROL_INVENTORY_UNSTABLE')
+
+
 def write(root,name,value):
     body=canonical(value).encode()
-    total=sum(p.stat().st_size for p in root.iterdir() if p.name not in (name,'.'+name+'.tmp'))
+    total=control_bytes(root,(name,'.'+name+'.tmp'))
     if total+len(body)>CONTROL_BYTES:raise RecoveryStop('RECOVERY_CONTROL_BUDGET')
     temp=root/('.'+name+'.tmp')
     if temp.exists():raise RecoveryStop('RECOVERY_UNKNOWN_CONTROL_WRITE')

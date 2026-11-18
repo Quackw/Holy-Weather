@@ -69,6 +69,12 @@ read a running process/credential; encrypted-at-rest does not hide it from root.
   before redundant control files retire. Hash-chained audit, lifetime attempt count,
   crash intent and recovery debt survive this compaction. A durable rotation intent
   permits only exact, idempotent retirement after a confirmed SQLite commit.
+- Control-file sizing allows five read-only rescans when another owner atomically
+  publishes a known JSON temporary file between directory enumeration and `stat`.
+  Its private regular destination must exist; the entire directory is recounted
+  so the 1-MiB cap still applies. Unknown/permanent missing files, missing
+  destinations and an inventory that never stabilizes remain explicit failures.
+  This does not retry a write, launch, send or service operation.
 - No indefinite-retention claim: retained events, control audit, dedupe and archives
   ultimately reach their bounds. Stop explicitly at the limit; do not delete history
   or raise a cap. Operator storage maintenance remains separately authorized.
