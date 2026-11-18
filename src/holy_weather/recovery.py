@@ -325,7 +325,8 @@ def worker(root,nonce,token,guard_fd=None):
                 sender_status(dict(telegram_enabled=cfg.telegram_enabled,telegram_disabled_reason='PREVIOUS_SEND_UNCONFIRMED' if disabled else delivery['telegram_disabled_reason']))
                 result=observe_catalogue(cfg,token=token if cfg.telegram_enabled else None,stop=stop,
                     discover=discover_city if plan.continuous else lambda city:frozen_discover(plan,city),progress=progress,session_day=plan.session_day,
-                    on_sender_status=sender_status,**({'rotate_bytes':160*1024**2} if plan.history_storage else {}))
+                    on_sender_status=sender_status,**({'rotate_bytes':160*1024**2} if plan.history_storage else {}),
+                    **({'price_recovery':True} if plan.continuous and cfg.us_lamp_enabled else {}))
                 outcome=result['state']
     except Exception as exc:
         # Exception text can contain private HTTP details. Keep only the class.

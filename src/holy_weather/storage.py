@@ -251,7 +251,8 @@ class Store:
             awaiting=quote and sample['token'] not in self.ready_tokens
             if awaiting and previous:
                 previous=reset(previous)
-            state, events, status = evolve(previous, sample, self.cfg)
+            # Baseline refusal may still reset the pre-evolution value below.
+            state, events, status = evolve(previous, sample, self.cfg, owned=not awaiting)
             if status=='ENGINE_POINT_BOUND' and self.cfg.price_alert_enabled:
                 # The accepted source clock must survive the research reset/GAP.
                 state['high_source']=sample['source_ms']
