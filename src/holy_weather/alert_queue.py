@@ -38,8 +38,9 @@ def card(event,market,at):
     else:
         f=event['current_forecast']
         reason='Crossed boundary: '+', '.join(event['crossed_boundaries_f'])+'°F' if event['crossed_boundaries_f'] else 'Peak change: '+num(event['change_f'])+'°F'
-        lines=['☀️ <b>LAMP ALERT</b>',title,
-               'Forecast peak: <b>'+num(event['previous_peak_f'])+'°F → '+num(event['future_peak_f'])+'°F</b>',reason,market_link]
+        lines=['☀️ <b>LAMP ALERT</b>',title+' · '+escape(market['station']),
+               'Forecast peak: <b>'+num(event['previous_peak_f'])+'°F → '+num(event['future_peak_f'])+'°F</b>',
+               'NOAA LAMP · '+reason,market_link]
         expires=f['issue_ms']+7200000
     text='\n'.join(lines)
     if len(text)>3500:raise ValueError('CARD_BOUND')

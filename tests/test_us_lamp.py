@@ -82,6 +82,7 @@ def test_ten_stations_all_buckets_independent_restart_atomic_queue(gamma,tmp_pat
         assert s.c.execute("select count(*) from meta where key like 'lamp_alert_v1:%'").fetchone()[0]==20
         queue={k:json.loads(v) for k,v in s.c.execute("select key,value from meta where key like 'alert_delivery_v1:%'")}
         assert len(queue)==20
+        assert all('NOAA LAMP' in v['html'] for v in queue.values())
         key=next(iter(queue));p=preview(s,key);assert claim(s,p,AT+1001)
         finish(s,p,{'status':'SENT','message_id':1},AT+1002)
         key2=next(k for k in queue if k!=key);p2=preview(s,key2);assert claim(s,p2,AT+1003)
@@ -340,3 +341,16 @@ def test_explicit_flag_preserves_accepted_plan_and_europe_boundary(gamma,tmp_pat
     assert recovery.Plan.load(plan.value()).value()==plan.value()
     assert recovery.Plan.load(recovery.Plan(cfg,None,None,continuous=True).value()).config.us_lamp_enabled
     with pytest.raises(ValueError,match='REQUIRES_US'):replace(cfg,region='europe')
+
+
+def test_clean_handoff_keeps_unclaimed_lamp_and_original_expiry(gamma,tmp_path):
+    cfg,markets=setup(gamma,tmp_path);m,r=markets[0]
+    with catalogue.CatalogueStore(cfg,session=False) as s:
+        s.bind(m,r);s.record_lamp(receipt(m['station']),m,AT)
+        s.record_lamp(receipt(m['station'],48,AT+1),m,AT+1)
+        before=s.c.execute("select key,value from meta where key like 'alert_delivery_v1:%'").fetchone()
+        assert not recovery.prepare_resume(s,{'isolated':'test'},AT+2,carry_pending_price=True)
+        assert before[1]==s.c.execute('select value from meta where key=?',(before[0],)).fetchone()[0]
+        s.expire_closed_deliveries(AT+3,selected=set())
+        final=json.loads(s.c.execute('select value from meta where key=?',(before[0],)).fetchone()[0])
+        assert final['status']=='EXPIRED' and final.get('claimed_ms') is None
