@@ -1,12 +1,13 @@
 """Finite supervision only. All subprocesses/data are isolated test fixtures."""
 from dataclasses import replace
-import io,json,os,signal,sqlite3,subprocess,sys,time,threading
+import io,json,os,random,signal,sqlite3,subprocess,sys,time,threading
 from pathlib import Path
 from unittest.mock import patch
 import pytest
 from holy_weather import recovery as r
-from holy_weather.catalogue import CatalogueStore,observe_catalogue
-from holy_weather.core import canonical
+from holy_weather.catalogue import CatalogueStore,Router,observe_catalogue
+from holy_weather.core import canonical,sha
+from holy_weather.history import digest,prepare,restore_history
 from holy_weather.alert_queue import preview,claim,finish
 from test_catalogue import setup,feed,AT
 
@@ -197,6 +198,68 @@ def test_archive_recovery_is_explicit_and_incomplete_part_blocks(gamma,tmp_path)
     r.checkpoint(plan,lambda stage:pytest.fail('disabled archive'))
     archive=tmp_path/'archive';part=archive/'part-001';part.mkdir(parents=True);private_tree(archive)
     with pytest.raises(r.RecoveryStop,match='UNFINISHED_ARCHIVE'):r.preflight(replace(plan,archive_dir=str(archive)))
+
+
+@pytest.mark.parametrize('continuous',[False,True])
+def test_checkpoint_headroom_preserves_price_and_research_evidence(gamma,tmp_path,monkeypatch,continuous):
+    plan,market=seed(gamma,tmp_path)
+    data=Path(plan.config.data_dir);db=data/'monitor.sqlite3';archive=tmp_path/'archive'
+    rng=random.Random(42)
+    ordinary_input={'fixture':rng.randbytes(4096).hex()}
+    recent_input={'fixture':'recent'}
+    last_input={'fixture':'input ID high-water'}
+    legacy_input={'fixture':'older than either window'}
+    with CatalogueStore(plan.config) as store:
+        store.reject(legacy_input,'FIXTURE',AT-16*60*1000,invalidate_state=False)
+        store.connection_started(AT);router=Router(store)
+        feed(router,market,'0.49',AT+1);feed(router,market,'0.71',AT+2)
+        key=store.c.execute("select key from meta where key like 'alert_delivery_v1:%'").fetchone()[0]
+        card=preview(store,key);assert claim(store,card,AT+3)
+        finish(store,card,{'status':'SENT','message_id':7},AT+4)
+        store.reject(ordinary_input,'FIXTURE',AT+5,invalidate_state=False)
+        for i in range(30):
+            store.reject({'fixture':rng.randbytes(4096).hex()},'FIXTURE',AT+6+i,invalidate_state=False)
+        store.reject(recent_input,'FIXTURE',AT+180000,invalidate_state=False)
+        store.reject(last_input,'FIXTURE',AT+180001,invalidate_state=False)
+        store.gap('COMPLETED_WINDOW',AT+180002)
+        original_events=[tuple(row) for row in store.c.execute('select * from events order by id')]
+        original_evidence=[tuple(row) for row in store.c.execute('select * from event_inputs order by event_id,input_id')]
+        original_delivery=store.c.execute('select value from meta where key=?',(key,)).fetchone()[0]
+        original_fired=[tuple(row) for row in store.c.execute("select key,value from meta where key like 'price_alert_v1:%' order by key")]
+        assert {'PRICE_ALERT','CROSS'} <= {row[4] for row in original_events}
+
+    before=digest(db)
+    legacy=prepare(data,tmp_path/'comparison',expected_sha=before)
+    monkeypatch.setattr(r,'ARCHIVE_TRIGGER_BYTES',1)
+    monkeypatch.setattr(r,'ARCHIVE_CANDIDATE_LIMIT_BYTES',legacy['candidate_bytes']-4096)
+    plan=replace(plan,archive_dir=str(archive))
+    if not continuous:
+        with pytest.raises(r.RecoveryStop,match='RECOVERY_ARCHIVE_HEADROOM'):
+            r.checkpoint(plan,lambda stage:None)
+        assert digest(db)==before and not (archive/'part-001'/'ADOPTED.json').exists()
+        return
+
+    plan=replace(plan,config=replace(plan.config,date=None),session_day=None,deadline_ms=None,continuous=True)
+    stages=[]
+    r.checkpoint(plan,stages.append)
+    part=archive/'part-001'
+    manifest=json.loads((part/'MANIFEST.json').read_text())
+    assert stages==['ARCHIVE'] and (part/'ADOPTED.json').is_file()
+    assert manifest['source_sha256']==before and manifest['archive_sha256']==legacy['archive_sha256']
+    assert manifest['cutoff_ms']==AT+180001-15*60*1000 and manifest['unreferenced_inputs']=='ARCHIVE_ONLY'
+    assert manifest['candidate_bytes'] <= r.ARCHIVE_CANDIDATE_LIMIT_BYTES
+    with CatalogueStore(plan.config) as store:
+        assert [tuple(row) for row in store.c.execute('select * from events order by id')]==original_events
+        assert [tuple(row) for row in store.c.execute('select * from event_inputs order by event_id,input_id')]==original_evidence
+        assert [tuple(row) for row in store.c.execute("select key,value from meta where key like 'price_alert_v1:%' order by key")]==original_fired
+        assert store.c.execute('select value from meta where key=?',(key,)).fetchone()[0]==original_delivery
+        assert store.c.execute('select identity from inputs order by id desc limit 1').fetchone()[0]==sha(last_input)
+        for archived in (ordinary_input,recent_input):
+            assert not store.c.execute('select 1 from inputs where identity=?',(sha(archived),)).fetchone()
+            assert store.history_seen.contains(sha(archived))
+        store.reject({'fixture':'after adoption'},'FIXTURE',AT+180003,invalidate_state=False)
+    restored=restore_history(db,part,tmp_path/'restore')
+    assert restored['inputs']['rows']==manifest['source_fingerprint']['inputs']['rows']+1
 
 
 def test_recovery_control_budget_and_permissions(tmp_path):

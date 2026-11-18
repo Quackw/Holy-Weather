@@ -23,6 +23,7 @@ INDEX='history_seen_v1:'
 PART='history_checkpoint_v1:'
 MAX_INDEX_BYTES=96*1024*1024
 MAX_SNAPSHOT_BYTES=256*1024*1024
+RESEARCH_RETENTION_MS=15*60*1000
 TABLES=('market','inputs','samples','state','latest','events','event_inputs','diagnostics','meta')
 
 
@@ -157,8 +158,13 @@ def unpack(archive,destination,expected):
     if h.hexdigest()!=expected:raise ValueError('HISTORY_ARCHIVE_SHA')
 
 
-def prepare(data_dir,destination,*,expected_sha,cutoff_ms=None):
-    """Prepare only. Original is never written, renamed, checkpointed or pruned."""
+def prepare(data_dir,destination,*,expected_sha,cutoff_ms=None,compact_price_inputs=False):
+    """Prepare only, leaving the original untouched.
+
+    A closed continuous PRICE worker starts its successor with a fresh baseline.
+    Unreferenced market inputs can live solely in its full archive. Recent
+    research events and all retained references are still exact.
+    """
     from .storage import SCHEMA,APP_ID
     source=Path(data_dir).absolute();dest=Path(destination).absolute();db=source/'monitor.sqlite3'
     if source.is_symlink() or db.is_symlink() or (source/'.writer.lock').is_symlink():raise ValueError('HISTORY_SYMLINK')
@@ -175,8 +181,8 @@ def prepare(data_dir,destination,*,expected_sha,cutoff_ms=None):
         try:
             check(a);seen=Seen(a);last=a.execute('select max(received_ms) from inputs').fetchone()[0]
             if last is None:raise ValueError('HISTORY_EMPTY')
-            cutoff=last-900000 if cutoff_ms is None else cutoff_ms
-            if type(cutoff) is not int or cutoff>last-900000:raise ValueError('HISTORY_RETENTION_MINIMUM')
+            cutoff=last-RESEARCH_RETENTION_MS if cutoff_ms is None else cutoff_ms
+            if type(cutoff) is not int or cutoff>last-RESEARCH_RETENTION_MS:raise ValueError('HISTORY_RETENTION_MINIMUM')
             dest.mkdir(mode=0o700);snapshot=dest/'snapshot.sqlite3';archive=dest/'history.sqlite3.gz'
             b=sqlite3.connect(snapshot);a.backup(b);check(b)
             old=fingerprint(a)
@@ -200,7 +206,9 @@ def prepare(data_dir,destination,*,expected_sha,cutoff_ms=None):
                 for raw, in a.execute("select value from meta where key like 'alert_delivery_v1:%'"):
                     q=json.loads(raw)
                     for ident in q.get('event_ids',[q['event_id']]):c.execute('insert or ignore into keep_events values(?)',(ident,))
-                c.execute("insert into keep_inputs select id from original.inputs where received_ms>=? or length(identity)!=64 or identity glob '*[^0-9a-f]*'",(cutoff,))
+                c.execute("""insert into keep_inputs select id from original.inputs
+                    where (? and received_ms>=?) or length(identity)!=64 or identity glob '*[^0-9a-f]*'""",
+                    (not compact_price_inputs,cutoff))
                 c.execute('insert or ignore into keep_inputs select max(id) from original.inputs')
                 c.execute('insert or ignore into keep_inputs select input_id from original.events where id in keep_events')
                 c.execute('insert or ignore into keep_inputs select input_id from original.event_inputs where event_id in keep_events')
@@ -233,6 +241,7 @@ def prepare(data_dir,destination,*,expected_sha,cutoff_ms=None):
                 manifest=dict(version=1,source_sha256=expected_sha,snapshot_sha256=snapshot_sha,backup_api_sha256=backup_sha,archive_sha256=digest(archive),cutoff_ms=cutoff,
                     removed_inputs=removed,removed_research_events=old['events']['rows']-c.execute('select count(*) from events').fetchone()[0],
                     source_fingerprint=old,archive='history.sqlite3.gz',schema=1)
+                if compact_price_inputs:manifest['unreferenced_inputs']='ARCHIVE_ONLY'
                 c.execute('insert into meta values(?,?)',(PART+snapshot_sha,canonical({k:v for k,v in manifest.items() if k!='source_fingerprint'})))
                 c.execute('commit');check(c);verify_seen_projection(c,a)
                 for table in TABLES:
