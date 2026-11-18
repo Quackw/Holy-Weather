@@ -58,6 +58,7 @@ def validate_guard(root,fd):
 
 
 def claim_child(root,nonce,fd,saved,write):
+    """Claim the verified launch and read its PRICE handoff authorization."""
     validate_guard(root,fd)
     state=json.loads((root/'state.json').read_text())
     entry=state['attempts'][-1]
@@ -65,7 +66,7 @@ def claim_child(root,nonce,fd,saved,write):
         raise LifecycleStop('LIFECYCLE_LAUNCH_INTENT_MISMATCH')
     owner=dict(protocol=PROTOCOL,nonce=nonce,binding=saved['identity'],process=own_identity(),controller=state['controller_process'])
     write(root,nonce+'.owner.json',owner)
-    return owner
+    return entry.get('carry_pending_price') is True
 
 
 def charge(state,now):
