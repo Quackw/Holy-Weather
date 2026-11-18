@@ -12,6 +12,40 @@ LIMIT=1024
 
 
 
+def index_active_deliveries(store):
+    """US worker-local lookup, rebuilt from durable receipts at every open.
+
+    The writer also changes queue rows during recovery, expiry and send completion.
+    TEMP triggers keep those direct writes and transaction rollbacks in sync.
+    Keep only keys here. The durable row is authoritative, including before claim.
+    """
+    match = f"key like '{PREFIX}%'"
+    active = "json_extract(value,'$.status') in ('PENDING','WAITING_BID')"
+    new_active = "json_extract(new.value,'$.status') in ('PENDING','WAITING_BID')"
+    store.c.executescript(f"""
+        CREATE TEMP TABLE active_delivery_keys(key TEXT PRIMARY KEY) WITHOUT ROWID;
+        INSERT INTO active_delivery_keys SELECT key FROM main.meta WHERE {match} AND {active};
+        CREATE TEMP VIEW active_deliveries AS
+            SELECT m.key, m.value FROM active_delivery_keys AS k
+            CROSS JOIN main.meta AS m ON m.key=k.key;
+        CREATE TEMP TRIGGER delivery_insert AFTER INSERT ON main.meta WHEN new.{match}
+        BEGIN
+            DELETE FROM active_delivery_keys WHERE key=new.key;
+            INSERT INTO active_delivery_keys SELECT new.key WHERE {new_active};
+        END;
+        CREATE TEMP TRIGGER delivery_update AFTER UPDATE ON main.meta WHEN old.{match} OR new.{match}
+        BEGIN
+            DELETE FROM active_delivery_keys WHERE key IN (old.key,new.key);
+            INSERT INTO active_delivery_keys SELECT new.key WHERE new.{match} AND {new_active};
+        END;
+        CREATE TEMP TRIGGER delivery_delete AFTER DELETE ON main.meta WHEN old.{match}
+        BEGIN
+            DELETE FROM active_delivery_keys WHERE key=old.key;
+        END;
+    """)
+    store.active_delivery_source = "temp.active_deliveries"
+
+
 def num(v):return format(Decimal(str(v)).normalize(),'f')
 def stamp(ms):return datetime.fromtimestamp(ms/1000,timezone.utc).strftime('%H:%M:%S UTC')
 
@@ -181,7 +215,7 @@ def settle_waits(store,at,*,sample=None,status=None,gap=None,token=None):
     """Caller owns transaction. Delivery-only evidence; never change PRICE state."""
     from .core import quote_clock_status
     from .price_alert import midpoint
-    rows=store.c.execute("select key,value from meta where key like ? and (json_extract(value,'$.status')='WAITING_BID' or (? and json_extract(value,'$.status')='PENDING' and (json_extract(value,'$.confirmation') is not null or json_extract(value,'$.delivery_notes') is not null)))",(PREFIX+'%',gap is not None or sample is not None)).fetchall()
+    rows=store.c.execute(f"select key,value from {store.active_delivery_source} where key like ? and (json_extract(value,'$.status')='WAITING_BID' or (? and json_extract(value,'$.status')='PENDING' and (json_extract(value,'$.confirmation') is not null or json_extract(value,'$.delivery_notes') is not null)))",(PREFIX+'%',gap is not None or sample is not None)).fetchall()
     for key,raw in rows:
         v=json.loads(raw)
         if token is not None and v['token']!=token:continue
@@ -224,7 +258,7 @@ def advance_waits(store,at):
     with store.transaction():
         settle_waits(store,at)
         # Only settled, unclaimed same-side work can combine. UNKNOWN is immutable.
-        rows=store.c.execute("select key,value from meta where key like ? and json_extract(value,'$.status')='PENDING' and json_extract(value,'$.batch_market') is not null order by json_extract(value,'$.event_ms'),key",(PREFIX+'%',)).fetchall()
+        rows=store.c.execute(f"select key,value from {store.active_delivery_source} where key like ? and json_extract(value,'$.status')='PENDING' and json_extract(value,'$.batch_market') is not null order by json_extract(value,'$.event_ms'),key",(PREFIX+'%',)).fetchall()
         groups={}
         for key,raw in rows:
             v=json.loads(raw)

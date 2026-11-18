@@ -125,6 +125,9 @@ class CatalogueStore(Store):
         self.markets = {}; self.tokens = {}
         super().__init__(cfg, **kwargs)
         try:
+            if cfg.us_lamp_enabled:
+                from .alert_queue import index_active_deliveries
+                index_active_deliveries(self)
             # Load only the latest retained date per station; older identities/evidence
             # remain in SQLite, not in the bounded subscription registry.
             for row in self.c.execute("""select m.value from meta m where m.key like ?
@@ -269,7 +272,7 @@ class CatalogueStore(Store):
         return value
 
     def expire_closed_deliveries(self, at, selected=None):
-        rows=self.c.execute("select key,value from meta where key like 'alert_delivery_v1:%' and json_extract(value,'$.status') in ('PENDING','WAITING_BID')").fetchall()
+        rows=self.c.execute(f"select key,value from {self.active_delivery_source} where key like 'alert_delivery_v1:%' and json_extract(value,'$.status') in ('PENDING','WAITING_BID')").fetchall()
         expired=[]
         for row in rows:
             value=json.loads(row['value'])

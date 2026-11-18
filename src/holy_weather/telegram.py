@@ -77,7 +77,7 @@ class Sender:
         advance_waits(store,at)
         self._collect(store)
         if self.stopped or (self.thread and self.thread.is_alive()) or at<self.next_send_ms:return
-        row=store.c.execute("select key from meta where key like ? and json_extract(value,'$.status')='PENDING' and coalesce(json_extract(value,'$.not_before_ms'),0)<=? order by coalesce(json_extract(value,'$.priority'),0) desc,json_extract(value,'$.event_ms'),key limit 1",(PREFIX+'%',at)).fetchone()
+        row=store.c.execute(f"select key from {store.active_delivery_source} where key like ? and json_extract(value,'$.status')='PENDING' and coalesce(json_extract(value,'$.not_before_ms'),0)<=? order by coalesce(json_extract(value,'$.priority'),0) desc,json_extract(value,'$.event_ms'),key limit 1",(PREFIX+'%',at)).fetchone()
         if not row:return
         p=preview(store,row[0])
         if not claim(store,p,at):return

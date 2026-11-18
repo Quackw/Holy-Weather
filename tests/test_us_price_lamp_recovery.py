@@ -201,7 +201,9 @@ def test_storage_owned_path_matches_copy_path_across_baseline_and_gaps(gamma,tmp
     assert results[0]==results[1]
 
 
-def test_accepted_binary_rollback_keeps_new_price_lamp_and_queue(gamma,tmp_path):
+@pytest.mark.parametrize("ref", ["56f14b0898558a84b278cda706ac421bf2a899de",
+                                 "94069ef1ef93dad34618587c24a469d36e53adcb"])
+def test_accepted_binary_rollback_keeps_new_price_lamp_and_queue(gamma,tmp_path,ref):
     from pathlib import Path
     import subprocess
     cfg,markets=setup(gamma,tmp_path);market,receipt=markets[0]
@@ -209,7 +211,7 @@ def test_accepted_binary_rollback_keeps_new_price_lamp_and_queue(gamma,tmp_path)
         lamp_first=forecast_receipt(market['station'],46,AT+6),
         lamp_second=forecast_receipt(market['station'],48,AT+3600000+6,issue=AT+1800000))
     (tmp_path/'fixture.json').write_text(json.dumps(fixture))
-    ref='56f14b0898558a84b278cda706ac421bf2a899de';old=tmp_path/'accepted'
+    old=tmp_path/'accepted'
     for name in subprocess.check_output(['git','ls-tree','-r','--name-only',ref,'src/holy_weather'],text=True).splitlines():
         if name.endswith('.py'):
             dest=old/Path(name).relative_to('src');dest.parent.mkdir(parents=True,exist_ok=True)
