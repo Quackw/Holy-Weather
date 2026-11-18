@@ -18,10 +18,11 @@ if len(sys.argv)>1 and sys.argv[1]=='worker':
  l.claim_child(root,nonce,fd,saved,r.write)
  stop=threading.Event();signal.signal(signal.SIGTERM,lambda *_:stop.set())
  token=sys.stdin.readline().strip();assert token.startswith('123456:')
+ progress=r.Progress(root,nonce)
+ r.checkpoint(plan,progress)
  with CatalogueStore(plan.config,session=False) as s:
   r.prepare_resume(s,saved['identity'],time.time_ns()//1000000)
   s.set_meta('systemd_offline_probe',{'pid':os.getpid()})
-  progress=r.Progress(root,nonce)
   progress.sender_status(dict(telegram_enabled=True,telegram_disabled_reason=None))
   while not stop.wait(.1):progress('OBSERVING')
  r.write(root,nonce+'.result.json',dict(nonce=nonce,pid=os.getpid(),state='SIGNAL_STOP',error=None))
@@ -57,17 +58,19 @@ def main():
     from dataclasses import replace
     from holy_weather.catalogue import CatalogueConfig,CatalogueStore
     from holy_weather.recovery import Plan
+    from holy_weather.history_files import HistoryStorage
     base=Path(tempfile.mkdtemp(prefix='holy-weather-systemd-',dir=os.environ['RUNNER_TEMP']));base.chmod(0o700)
     root=Path(__file__).resolve().parents[1];unit_name='holy-weather-offline-'+str(os.getpid())+'.service'
     probe=base/'probe.py';probe.write_text(PROBE);probe.chmod(0o600)
     cfg=CatalogueConfig(data_dir=str(base/'data'),telegram_enabled=True,price_notification_filter=True)
     with CatalogueStore(cfg,session=False):pass
-    plan=Plan(cfg,None,None,continuous=True)
+    plan=Plan(cfg,None,None,continuous=True,archive_dir=str(base/'archive'),
+              history_storage=HistoryStorage(str(base/'absent-history-disk')))
     (base/'plan.json').write_text(json.dumps(plan.value()));(base/'plan.json').chmod(0o600)
     encrypted=base/'telegram.encrypted'
     command('/usr/bin/systemd-creds','encrypt','--with-key=host','--name=telegram','-',str(encrypted),input='123456:'+'offline_test_only_'*3)
     template=(root/'deploy/holy-weather-price@.service.in').read_text()
-    unit=template.replace('@RELEASE@',str(base)).replace('User=polymeteo-agent','User=root')
+    unit=template.replace('@RELEASE@',str(base)).replace('@HISTORY_PATHS@','ReadWritePaths=-'+str(base/'absent-history-disk')).replace('User=polymeteo-agent','User=root')
     unit=unit.replace('WorkingDirectory='+str(base),'WorkingDirectory='+str(root))
     unit=unit.replace(str(base)+'/venv/bin/python -B -m holy_weather.service',sys.executable+' -B '+str(probe))
     unit=unit.replace('/etc/holy-weather/%i.json',str(base/'plan.json')).replace('/var/lib/holy-weather/%i/control',str(base/'control'))
@@ -82,7 +85,8 @@ def main():
         command('/usr/bin/systemd-analyze','verify',str(unit_path));report['unit_verify']='PASS'
         command('/usr/bin/systemctl','daemon-reload');command('/usr/bin/systemctl','start',unit_name)
         path=base/'control/state.json'
-        first=await_state(path,lambda s:s['status']=='RUNNING' and s.get('telegram_enabled') is True)
+        first=await_state(path,lambda s:s['status']=='RUNNING' and s.get('telegram_enabled') is True and s.get('storage',{}).get('status')=='SPOOLING')
+        report['history_disk_absent_primary_collection']='PASS'
         parent=first['controller_process'];os.kill(parent['pid'],signal.SIGKILL)
         second=await_state(path,lambda s:s['status']=='RUNNING' and s['controller_process']!=parent)
         assert len(second['restarts'])==1 and second['attempts'][-1]['at_ms']>=second['restarts'][0]+30000

@@ -39,6 +39,10 @@ It is bounded to 96 MiB decoded, checked for hash/order/length, and searched in
 packed bytes. It never guesses from a probabilistic filter. Corrupt or oversized
 state fails closed. No alert rule, formula, time, threshold or expiry changes.
 
+The optional [PRICE storage lifecycle](PRICE_STORAGE_LIFECYCLE.md) replaces
+the cumulative inline index with exact disk lookup and verified index increments.
+Its separate history-disk policy requires its own approved deployment.
+
 At a closed continuous PRICE catalogue checkpoint, unreferenced market inputs
 are retained in the full archive. The successor starts with a new baseline. The
 15-minute research-event window and all its evidence stay in the working SQLite,
