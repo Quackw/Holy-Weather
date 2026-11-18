@@ -8,6 +8,10 @@ StartLimitBurst=4
 
 [Service]
 Type=exec
+NotifyAccess=main
+WatchdogSec=360s
+WatchdogSignal=SIGABRT
+TimeoutAbortSec=45s
 User=polymeteo-agent
 WorkingDirectory=@RELEASE@
 ExecStart=@RELEASE@/venv/bin/python -B -m holy_weather.service run --plan /etc/holy-weather/%i.json --control-dir /var/lib/holy-weather/%i/control
