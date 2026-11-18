@@ -17,6 +17,7 @@ from .discovery import discover
 from .storage import Store, StorageStop
 
 BASELINE_RECOVERY_SECONDS=5
+UNCHANGED_QUOTE_CHECKPOINT_MS = 15_000
 
 
 class BaselineRecoveryTimeout(TimeoutError):
@@ -39,12 +40,13 @@ def disk_write_bytes():
 
 
 def price_confirmation_unchanged(store,sample):
-    """Depth updates cannot prove that PRICE already processed this full BBO."""
+    """Coalesce a BBO only while its own persisted PRICE checkpoint is recent."""
     if not store.cfg.price_alert_enabled or sample['kind']!='best_bid_ask':return True
     if sample['token'] not in store.price_alert_ready:return False
     row=store.c.execute('select value from meta where key=?',('price_alert_v1:'+sample['token'],)).fetchone()
     previous=json.loads(row[0]).get('previous') if row else None
-    return bool(previous and (previous['bid'],previous['ask'])==(sample['bid'],sample['ask']))
+    return bool(previous and (previous['bid'],previous['ask'])==(sample['bid'],sample['ask'])
+                and 0 <= sample['received_ms'] - previous['received_ms'] < UNCHANGED_QUOTE_CHECKPOINT_MS)
 
 
 def process(raw, received_ms, market, store, counters):
@@ -102,7 +104,12 @@ def process(raw, received_ms, market, store, counters):
                 store.reject(message,'OUT_OF_ORDER_CONFIRMATION',received_ms,sample['token']);counters['OUT_OF_ORDER']+=1;continue
             if previous and received_ms<previous.get('received_ms',previous['persisted_ms']):
                 store.reject(message,'RECEIPT_CLOCK_REVERSED',received_ms,sample['token']);counters['RECEIPT_CLOCK_REVERSED']+=1;continue
-            if quote and previous and (sample['kind']!='best_bid_ask' or sample['token'] in store.ready_tokens) and sample['id']!=previous['identity']and sample['kind']in ('price_change','best_bid_ask')and(sample['bid'],sample['ask'])==previous['top']and quote_clock_status(store.cfg,sample['source_ms'],received_ms,received_ms)=='FRESH' and 0<=received_ms-previous['persisted_ms']<15000 and price_confirmation_unchanged(store,sample):
+            if (quote and previous and sample['kind'] in ('price_change','best_bid_ask')
+                    and (sample['kind']!='best_bid_ask' or sample['token'] in store.ready_tokens)
+                    and sample['id']!=previous['identity'] and (sample['bid'],sample['ask'])==previous['top']
+                    and quote_clock_status(store.cfg,sample['source_ms'],received_ms,received_ms)=='FRESH'
+                    and 0 <= received_ms - previous['persisted_ms'] < UNCHANGED_QUOTE_CHECKPOINT_MS
+                    and price_confirmation_unchanged(store,sample)):
                 store.seen_tops[sample['token']]=dict(previous,source_ms=sample['source_ms'],received_ms=received_ms,identity=sample['id'])
                 counters['coalesced_unchanged_top_confirmations']+=1;continue
             if quote and 0<sample['source_ms']-received_ms<=store.cfg.source_clock_tolerance_ms:
