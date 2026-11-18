@@ -30,6 +30,8 @@ class StorageStop(RuntimeError):
 
 
 class Store:
+    active_delivery_source = "meta"
+
     def __init__(self, cfg, *, session=True):
         self.cfg, self.closed = cfg, False
         self.seen_tops={}
