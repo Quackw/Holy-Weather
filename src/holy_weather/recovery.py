@@ -98,9 +98,29 @@ def private(path,directory=False):
     if directory!=path.is_dir():raise RecoveryStop('RECOVERY_PATH_TYPE')
 
 
+def control_bytes(root,excluded):
+    """Bounded read-only rescan when another owner's atomic temp is replaced."""
+    for _ in range(5):
+        total=0
+        for path in root.iterdir():
+            if path.name in excluded:continue
+            try:total+=path.stat().st_size
+            except FileNotFoundError:
+                known=re.fullmatch(r'\.(?:(?:state|plan|rotation|service-stop)\.json|[0-9a-f]{32}\.(?:owner|progress|result)\.json)\.tmp',path.name)
+                if not known:raise
+                destination=root/path.name[1:-4]
+                private(destination)
+                if not destination.is_file():raise RecoveryStop('RECOVERY_CONTROL_REPLACEMENT_TYPE')
+                # Recount the destination and every other file together. Skipping
+                # the missing temp could omit a newly published file from budget.
+                break
+        else:return total
+    raise RecoveryStop('RECOVERY_CONTROL_INVENTORY_UNSTABLE')
+
+
 def write(root,name,value):
     body=canonical(value).encode()
-    total=sum(p.stat().st_size for p in root.iterdir() if p.name not in (name,'.'+name+'.tmp'))
+    total=control_bytes(root,(name,'.'+name+'.tmp'))
     if total+len(body)>CONTROL_BYTES:raise RecoveryStop('RECOVERY_CONTROL_BUDGET')
     temp=root/('.'+name+'.tmp')
     if temp.exists():raise RecoveryStop('RECOVERY_UNKNOWN_CONTROL_WRITE')
@@ -305,7 +325,7 @@ def spawn(root,nonce,token,guard_fd=None):
     return child
 
 
-def supervise(plan,control_dir,*,token=None,stop=None,clock=None,monotonic=time.monotonic,wait=None,_spawn=spawn):
+def supervise(plan,control_dir,*,token=None,stop=None,clock=None,monotonic=time.monotonic,wait=None,_spawn=spawn,on_health=None):
     """Graceful stop only. Continuous recovery additionally proves Linux ownership."""
     if plan.config.telegram_enabled and (not isinstance(token,str) or not re.fullmatch(r'\d+:[A-Za-z0-9_-]{20,}',token)):raise RecoveryStop('RECOVERY_EXPLICIT_TOKEN')
     default_wait=wait is None
@@ -339,8 +359,10 @@ def supervise(plan,control_dir,*,token=None,stop=None,clock=None,monotonic=time.
         write(root,'plan.json',saved_plan)
         mono_deadline=float('inf') if plan.deadline_ms is None else monotonic()+max(0,(plan.deadline_ms-clock())/1000)
         retry=bool(state.get('retry'));child=None
+        def health():
+            if on_health:on_health({k:state[k] for k in ('status','telegram_enabled','telegram_disabled_reason') if k in state})
         def save(status):
-            state.update(status=status,last_ms=clock());write(root,'state.json',state)
+            state.update(status=status,last_ms=clock());write(root,'state.json',state);health()
         def ended():return stop.is_set() or plan.deadline_ms is not None and clock()>=plan.deadline_ms or monotonic()>=mono_deadline
         def sender_status(value):
             if 'telegram_enabled' not in value:return
@@ -350,6 +372,7 @@ def supervise(plan,control_dir,*,token=None,stop=None,clock=None,monotonic=time.
                 state.update(telegram_enabled=enabled,telegram_disabled_reason=reason);save(state['status'])
         try:
             while not ended():
+                health()
                 now=clock()
                 if now<state['last_ms']:raise RecoveryStop('RECOVERY_CLOCK_REVERSED')
                 if plan.continuous:state=lifecycle.compact_control(root,plan,state,write,now)
@@ -363,6 +386,7 @@ def supervise(plan,control_dir,*,token=None,stop=None,clock=None,monotonic=time.
                     state.update(retry=True,next_ms=next_ms);save('BACKOFF')
                     while clock()<next_ms and not ended():
                         if clock()<state['last_ms']:raise RecoveryStop('RECOVERY_CLOCK_REVERSED')
+                        health()
                         wait(min(1,(next_ms-clock())/1000))
                     if ended():break
                 if code_identity()!=code:raise RecoveryStop('RECOVERY_CODE_DRIFT')
@@ -393,6 +417,7 @@ def supervise(plan,control_dir,*,token=None,stop=None,clock=None,monotonic=time.
                         state['observation']=progress.get('observation');save(state['status'])
                     if progress and progress.get('storage')!=state.get('storage'):
                         state['storage']=progress.get('storage');save(state['status'])
+                    health()
                     age=monotonic()-(progress['monotonic'] if progress else started)
                     limit=STAGE_TIMEOUT[progress['stage']] if progress else STAGE_TIMEOUT['STARTING']
                     if not requested and (ended() or age>limit):

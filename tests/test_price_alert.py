@@ -1,7 +1,11 @@
 from dataclasses import replace
 import json
 from collections import Counter
-from holy_weather.core import normalize
+import zlib
+
+import pytest
+
+from holy_weather.core import sha
 from holy_weather.storage import Store
 from holy_weather.app import process
 from holy_weather.price_alert import midpoint
@@ -32,6 +36,80 @@ def send(s,m,raw,at):
     process(json.dumps(raw),at,m,s,Counter())
 
 def alerts(s):return [json.loads(r[0])for r in s.c.execute("select payload from events where type='PRICE_ALERT'")]
+
+
+def unchanged_depth(market, at):
+    return dict(event_type='price_change', market=market['condition_id'], timestamp=str(at), price_changes=[
+        dict(asset_id=market['tokens']['YES'], side='BUY', price='0.48', size='25', best_bid='0.48', best_ask='0.50')])
+
+
+@pytest.mark.parametrize(('depth_offsets', 'cross_offset'), [
+    (range(15_000, 105_001, 15_000), 105_002),
+    ((89_998,), 90_001),
+], ids=['alternating-105-seconds', 'near-90-second-boundary'])
+def test_depth_does_not_postpone_price_confirmation_checkpoint(cfg, market, make_raw, depth_offsets, cross_offset):
+    token = market['tokens']['YES']
+    with Store(replace(cfg, price_alert_enabled=True, alert_queue_enabled=True)) as s:
+        s.bind(market, {'received_at': '2026-11-14T12:00:00Z'})
+        s.connection_started(AT)
+        send(s, market, make_raw('0.50', AT, bid='0.48', kind='book'), AT)
+        for offset in depth_offsets:
+            send(s, market, unchanged_depth(market, AT + offset), AT + offset)
+            confirmed_at = AT + offset + 1
+            confirmation = make_raw('0.50', confirmed_at, bid='0.48')
+            send(s, market, confirmation, confirmed_at)
+        assert not alerts(s)
+
+        crossed_at = AT + cross_offset
+        crossing = make_raw('0.52', crossed_at, bid='0.50')
+        send(s, market, crossing, crossed_at)
+        events = alerts(s)
+        assert len(events) == 1
+        event = events[0]
+        assert event['side'] == 'YES' and event['thresholds'] == ['0.50']
+
+        refs = set()
+        for name, raw, at, bid, ask, mid in (
+            ('previous', confirmation, confirmed_at, '0.48', '0.50', '0.49'),
+            ('current', crossing, crossed_at, '0.50', '0.52', '0.51'),
+        ):
+            quote = event[name]
+            assert (quote['source_ms'], quote['received_ms']) == (at, at)
+            assert (quote['bid'], quote['ask'], quote['midpoint']) == (bid, ask, mid)
+            refs.add(quote['input_id'])
+            stored = s.c.execute('select received_ms,raw,raw_sha from inputs where id=?', (quote['input_id'],)).fetchone()
+            body = zlib.decompress(stored['raw'])
+            assert (stored['received_ms'], json.loads(body), stored['raw_sha']) == (at, raw, sha(body))
+        assert len(refs) == 2
+        event_id, input_id = s.c.execute("select id,input_id from events where type='PRICE_ALERT'").fetchone()
+        assert input_id == event['current']['input_id']
+        linked = s.c.execute('select input_id from event_inputs where event_id=?', (event_id,))
+        assert {row[0] for row in linked} == refs | {s.discovery_reference(token)[0]}
+        state = json.loads(s.c.execute('select value from meta where key=?', ('price_alert_v1:' + token,)).fetchone()[0])
+        assert state['fired'] == ['0.50']
+        assert s.c.execute('select count(*) from samples').fetchone()[0] <= len(depth_offsets) + 3
+
+        counts = Counter()
+        process(json.dumps(crossing), crossed_at + 1, market, s, counts)
+        assert counts['DUPLICATE'] == 1 and alerts(s) == events
+        queue = [json.loads(row[0]) for row in s.c.execute("select value from meta where key like 'alert_delivery_v1:%'")]
+        assert len(queue) == 1 and queue[0]['event_id'] == event_id and queue[0]['status'] == 'PENDING'
+
+
+def test_fresh_depth_without_full_confirmation_does_not_extend_price_baseline(cfg, market, make_raw):
+    with Store(replace(cfg, price_alert_enabled=True, alert_queue_enabled=True)) as s:
+        s.bind(market, {'received_at': '2026-11-14T12:00:00Z'})
+        s.connection_started(AT)
+        send(s, market, make_raw('0.50', AT, bid='0.48', kind='book'), AT)
+        for offset in range(15_000, 105_001, 15_000):
+            send(s, market, unchanged_depth(market, AT + offset), AT + offset)
+        crossed_at = AT + 105_002
+        send(s, market, make_raw('0.52', crossed_at, bid='0.50'), crossed_at)
+        assert not alerts(s)
+        assert not s.c.execute("select 1 from meta where key like 'alert_delivery_v1:%'").fetchone()
+        reason = s.c.execute("select reason from diagnostics where category='PRICE_ALERT' and received_ms=?", (crossed_at,)).fetchone()[0]
+        assert reason == 'BASELINE:' + market['tokens']['YES']
+
 
 def test_cross_restart_gap_dedupe(cfg,market,make_raw):
     cfg=replace(cfg,price_alert_enabled=True)
