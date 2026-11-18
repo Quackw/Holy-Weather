@@ -52,6 +52,13 @@ class Sender:
         self.minimum_interval_ms=minimum_interval_ms;self.next_send_ms=0
         self.token=token;self.transport=transport;self.thread=None;self.results=queue.Queue(maxsize=1);self.stopped=False
         self.closed=False;self.inflight=False;self.disabled_reason=None
+
+    def restore_pacing(self,store):
+        """Restore the remaining interval from the last durable claim in this store."""
+        last=store.c.execute("select max(json_extract(value,'$.claimed_ms')) from meta where key like ?",
+                             (PREFIX+'%',)).fetchone()[0]
+        if last is not None:self.next_send_ms=max(self.next_send_ms,last+self.minimum_interval_ms)
+
     def status(self):
         return dict(telegram_enabled=self.disabled_reason is None,telegram_disabled_reason=self.disabled_reason)
     def _collect(self,store):
