@@ -140,3 +140,17 @@ observability. No heartbeat, receive watermark, freshness limit, alert, delivery
 service, retention policy or dependency changes. Actual observation of these
 new fields requires a separately approved runtime switch; offline tests cannot
 prove the cause of an existing production incident.
+
+### Offline comparison
+
+Run `python -m pytest -q tests/test_catalogue_transport.py -k receive_queue_measurements`.
+The local socket pair carries the same 32 PRICE frames with and without the
+receiver hook. The consumer pauses for at least 100 ms. The test observes the
+paused queue and unread bytes, drains every frame in order, and compares PRICE
+rows, evidence, thresholds, delivery records and the SQLite write count. The
+fixture clocks give the crossing a fixed 150 ms source-to-receipt delay.
+
+The `WS_BACKLOG_PROOF` line reports wall time until the first read and paired
+median CPU costs from 120,000 receiver frames and 12,000 routed PRICE frames per
+mode. The cost measurements describe this workload. The queue fields indicate
+build-up and pause, while per-frame delay is calculated from the two clocks.

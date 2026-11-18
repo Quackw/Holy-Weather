@@ -20,8 +20,8 @@ DAY_PREFIX = 'price_catalogue_day_v1:'
 DAY_REFUSAL_PREFIX = 'price_catalogue_day_refusal_v1:'
 
 
-# The library already owns the receiver thread. It only updates two scalar
-# clocks here; the main thread remains the sole SQLite writer.
+# The library owns the receiver thread. It publishes bounded timing and queue
+# observations. The main thread remains the sole SQLite writer.
 from websockets.sync.client import ClientConnection
 from websockets.frames import Frame,PONG,DATA_OPCODES
 
