@@ -470,6 +470,7 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
     progress('STARTING')
     with CatalogueStore(cfg) as store:
         try:
+            if sender:sender.restore_pacing(store)
             deadline=monotonic()+cfg.duration_seconds
             days=DayDiscovery(store,discover,clock,session_day=session_day)
             stopped=lambda:stop.is_set() or monotonic()>=deadline
