@@ -440,7 +440,9 @@ with CatalogueStore(CatalogueConfig(**v),session=False) as s:
  'state':[tuple(x) for x in s.c.execute(\"select key,value from meta where key like 'price_alert_v1:%' or key like 'alert_delivery_v1:%' order by key\")]}))
 """
     env=dict(os.environ,PYTHONPATH=str(old),PYTHONDONTWRITEBYTECODE='1')
-    result=json.loads(subprocess.check_output([sys.executable,'-B','-c',script,json.dumps(asdict(cfg)),json.dumps(metrics),str(AT+6)],env=env,text=True))
+    old_config=asdict(cfg)
+    old_config.pop('us_lamp_enabled')
+    result=json.loads(subprocess.check_output([sys.executable,'-B','-c',script,json.dumps(old_config),json.dumps(metrics),str(AT+6)],env=env,text=True))
     assert result==json.loads(json.dumps(before))
     with CatalogueStore(cfg,session=False) as store:
         assert store.c.execute('select count(*) from inputs').fetchone()[0]==count+1

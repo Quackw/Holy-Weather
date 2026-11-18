@@ -103,10 +103,13 @@ class CatalogueConfig(Config):
     source_clock_tolerance_ms: int = 100
     price_alert_enabled: bool = True
     alert_queue_enabled: bool = True
+    us_lamp_enabled: bool = False
 
     def __post_init__(self):
         super().__post_init__()
         if self.region not in ('us','europe'):raise ValueError('CATALOGUE_REGION')
+        if type(self.us_lamp_enabled) is not bool or self.us_lamp_enabled and self.region!='us':
+            raise ValueError('CATALOGUE_LAMP_REQUIRES_US')
         if (self.weather_context or self.lamp_context or self.lamp_alert_enabled
                 or not self.price_alert_enabled or not self.alert_queue_enabled):
             raise ValueError('CATALOGUE_PRICE_ONLY')
@@ -442,7 +445,7 @@ class DayDiscovery:
 
 def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=None, token=None,
                       clock=None, monotonic=time.monotonic, stop=None, wait=None, progress=None, session_day=None,
-                      on_sender_status=None,rotate_bytes=None):
+                      on_sender_status=None,rotate_bytes=None,lamp_fetch=None):
     """Finite session with local-day revalidation; no service or extended deadline."""
     import threading
     from websockets.exceptions import WebSocketException
@@ -456,6 +459,10 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
         raise ValueError('CATALOGUE_ROTATION_BOUND')
     if cfg.telegram_enabled and not token:raise ValueError('EXPLICIT_TELEGRAM_TOKEN_REQUIRED')
     sender=Sender(token,**({'transport':transport} if transport else {}),minimum_interval_ms=3100) if cfg.telegram_enabled else None
+    lamp=None
+    if cfg.us_lamp_enabled:
+        from .us_lamp import Collection,fetch_cycle
+        lamp=Collection(lamp_fetch or fetch_cycle)
     result={'cities':{},'state':'PREPARING','telegram_enabled':cfg.telegram_enabled,'weather_enabled':False}
     reported_sender=None
     def sender_status():
@@ -493,6 +500,7 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
                     selected=days.selected;result['cities']=days.results
                     router.selected=set(selected)
                     for condition in selected:router.per_market.setdefault(condition,Counter())
+                if lamp:lamp.tick(store,selected,clock())
                 tokens=[t for t,c in store.tokens.items() if c in selected and store.active(c,clock())]
                 if not tokens:
                     result['state']='NO_VERIFIED_CURRENT_MARKETS'
@@ -548,6 +556,7 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
                             # the bounded receiver, including native PONG reads.
                             if monotonic()>=next_delivery:
                                 delivery_start=monotonic()
+                                if lamp:lamp.tick(store,selected,clock())
                                 # Always recheck lifecycle immediately before send,
                                 # including between throttled global market scans.
                                 store.expire_closed_deliveries(at)
@@ -611,6 +620,15 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
                     if result.get('rotation_reason'):break
                     if days.due() or not any(store.active(c,clock()) for c in selected):continue
                     break
+            # Source collection and its sender continue during a known market
+            # outage until this bounded worker ends. PRICE stays disconnected.
+            if lamp and result['state'] in ('NETWORK_GAP_NO_RETRY','RECONNECT_BUDGET_EXHAUSTED','NETWORK_REFUSED_NO_RETRY'):
+                while not stopped():
+                    progress('OBSERVING')
+                    lamp.tick(store,selected,clock())
+                    store.expire_closed_deliveries(clock())
+                    if sender:sender.tick(store,clock());sender_status()
+                    if wait(min(.25,max(0,deadline-monotonic()))):break
             progress('STOPPING')
             store.gap('CATALOGUE_SESSION_ENDED',clock())
             if hasattr(progress,'observation'):progress.observation(store.runtime_status(clock()))
@@ -630,8 +648,12 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
             result['sqlite_integrity']=store.c.execute('pragma integrity_check').fetchone()[0]
             result['foreign_key_errors']=len(store.c.execute('pragma foreign_key_check').fetchall())
             result['data_bytes']=store.usage()
+            if lamp:
+                result['lamp']={key:json.loads(raw) for key,raw in store.c.execute(
+                    "select key,value from meta where key='us_lamp_poll_v1' or key like 'lamp_context_v1:%'")}
             return result
         finally:
+            if lamp:lamp.close()
             if sender:sender.close(store);sender_status()
 
 
@@ -645,6 +667,7 @@ def main():
     parser.add_argument('--region',choices=('europe','us'),default='europe')
     parser.add_argument('--seconds',type=int,default=120)
     parser.add_argument('--send',action='store_true')
+    parser.add_argument('--us-lamp',action='store_true',help='Opt in to independent NOAA LAMP for the US catalogue')
     parser.add_argument('--price-notification-filter',action='store_true',
                         help='Fast 70/80 delivery, ask-only bid confirmation, and ordinary same-side batches')
     parser.add_argument('--price-batch-seconds',type=int,choices=(10,15,30),default=10)
@@ -652,7 +675,8 @@ def main():
     for sig in (signal.SIGINT,signal.SIGTERM):signal.signal(sig,lambda *_:stop.set())
     cfg=CatalogueConfig(region=args.region,city='new-york' if args.region=='us' else 'london',
                         data_dir=args.data_dir,duration_seconds=args.seconds,telegram_enabled=args.send,
-                        price_notification_filter=args.price_notification_filter,price_batch_seconds=args.price_batch_seconds)
+                        price_notification_filter=args.price_notification_filter,price_batch_seconds=args.price_batch_seconds,
+                        us_lamp_enabled=args.us_lamp)
     result=observe_catalogue(cfg,token=token_from_env() if args.send else None,stop=stop)
     print(json.dumps(result,ensure_ascii=False,sort_keys=True))
     return 0 if result['state']=='COMPLETED_WINDOW' else 2

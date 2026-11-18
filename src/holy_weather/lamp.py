@@ -13,6 +13,12 @@ from .weather import WeatherPoller, millis, station_check
 SOURCE='https://lamp.mdl.nws.noaa.gov/cgi-bin/getlav.pl?sta=KLGA'
 MAX_BODY=65536
 MAX_AGE_MS=2*60*60*1000  # explicit hourly-guidance context policy, not market TTL
+NOMADS='https://nomads.ncep.noaa.gov/pub/data/nccf/com/lmp/prod/'
+
+
+def nomads_source(issue_ms):
+    issued=datetime.fromtimestamp(issue_ms/1000,timezone.utc)
+    return NOMADS+issued.strftime('lmp.%Y%m%d/lmp.t%H30z.lavtxt.ascii')
 
 
 class _Pre(HTMLParser):
@@ -53,23 +59,33 @@ def fetch_lamp(*,station='KLGA',fetch=urlopen,clock=millis):
 def decode(receipt,market,available_ms):
     station_check(market)
     requested,received=receipt['requested_ms'],receipt['received_ms']
-    if receipt['source']!=source_for(market['station']):raise ValueError('LAMP_SOURCE')
+    native=re.fullmatch(re.escape(NOMADS)+r'lmp\.\d{8}/lmp\.t\d{2}30z\.lavtxt\.ascii',receipt['source'])
+    if receipt['source']!=source_for(market['station']) and not native:raise ValueError('LAMP_SOURCE')
     if any(type(t)is not int for t in (requested,received,available_ms)) or not 0<=requested<=received<=available_ms:
         raise ValueError('LAMP_RECEIPT_CLOCK')
     state=dict(status=receipt['status'],received_ms=received,available_ms=available_ms,
-               source=source_for(market['station']),hours=[],issue_ms=None,units='F',day=market['date'])
+               source=receipt['source'],hours=[],issue_ms=None,units='F',day=market['date'])
     if receipt['status']!='OK':return state
     raw=receipt['raw_body'];body=raw.encode()
     if len(body)>MAX_BODY or sha(body)!=receipt['sha256']:raise ValueError('LAMP_BODY_SHA_OR_BOUND')
-    parser=_Pre();parser.feed(raw)
-    if len(parser.blocks)!=1:raise ValueError('LAMP_SINGLE_BULLETIN_REQUIRED')
-    text=parser.blocks[0];lines=text.splitlines()
-    headers=[re.fullmatch(r'\s*([A-Z0-9]{4})\s+.+?\bGFS LAMP (\d{2})(\d{2}) UTC\s+(\d{1,2})/(\d{1,2})/(\d{4})\s*',line)for line in lines]
+    if native:
+        text=raw
+        pattern=r'\s*([A-Z0-9]{4})\s+GFS LAMP GUIDANCE\s+(\d{1,2})/(\d{1,2})/(\d{4})\s+(\d{2})(30) UTC\s*'
+    else:
+        parser=_Pre();parser.feed(raw)
+        if len(parser.blocks)!=1:raise ValueError('LAMP_SINGLE_BULLETIN_REQUIRED')
+        text=parser.blocks[0]
+        pattern=r'\s*([A-Z0-9]{4})\s+.+?\bGFS LAMP (\d{2})(\d{2}) UTC\s+(\d{1,2})/(\d{1,2})/(\d{4})\s*'
+    lines=text.splitlines()
+    headers=[re.fullmatch(pattern,line)for line in lines]
     headers=[h for h in headers if h]
     if len(headers)!=1 or headers[0][1]!=market['station']:raise ValueError('LAMP_STATION_OR_HEADER')
-    h=headers[0];issued=datetime(int(h[6]),int(h[4]),int(h[5]),int(h[2]),int(h[3]),tzinfo=timezone.utc)
+    h=headers[0]
+    issued=(datetime(int(h[4]),int(h[2]),int(h[3]),int(h[5]),int(h[6]),tzinfo=timezone.utc) if native else
+            datetime(int(h[6]),int(h[4]),int(h[5]),int(h[2]),int(h[3]),tzinfo=timezone.utc))
     issued_ms=int(issued.timestamp()*1000)
     if issued_ms>received:raise ValueError('LAMP_FUTURE_ISSUE')
+    if native and receipt['source']!=nomads_source(issued_ms):raise ValueError('LAMP_SOURCE_ISSUE_MISMATCH')
     state.update(issue_ms=issued_ms,issue_clock='BULLETIN_HEADER',raw_bulletin=text,body_sha256=sha(body))
     def row(label):
         found=[re.fullmatch(r'\s*'+label+r' (.*)',line)for line in lines]
@@ -97,7 +113,7 @@ def decode(receipt,market,available_ms):
 def update(previous,receipt,market,available_ms):
     try:state=decode(receipt,market,available_ms)
     except (ValueError,KeyError,TypeError,OverflowError)as exc:
-        state=dict(status='INVALID_DATA',reason=str(exc),source=source_for(market['station']),hours=[],issue_ms=None,
+        state=dict(status='INVALID_DATA',reason=str(exc),source=receipt['source'],hours=[],issue_ms=None,
                    received_ms=receipt['received_ms'],available_ms=available_ms)
     previous=previous or {}
     state['duplicate']=False
@@ -121,16 +137,24 @@ def c_to_f(value):
 def bucket_context(market,observed_f,peak_f):
     if 'half rounded up' not in market.get('rules',''):return {'status':'UNVERIFIED_RULES'}
     m=re.fullmatch(r'(-?\d+)-(-?\d+)°F',market['bucket'])
-    if not m or int(m[2])<int(m[1]):return {'status':'UNSUPPORTED_BUCKET'}
-    low,high=Decimal(m[1])-Decimal('.5'),Decimal(m[2])+Decimal('.5')
-    result=dict(status='VERIFIED',label=market['bucket'],lower_f=str(low),upper_f=str(high),
+    tail=re.fullmatch(r'(-?\d+)°F or (below|higher)',market['bucket'])
+    if m and int(m[2])>=int(m[1]):
+        low,high=Decimal(m[1])-Decimal('.5'),Decimal(m[2])+Decimal('.5')
+    elif tail:
+        low=Decimal(tail[1])-Decimal('.5') if tail[2]=='higher' else None
+        high=Decimal(tail[1])+Decimal('.5') if tail[2]=='below' else None
+    else:return {'status':'UNSUPPORTED_BUCKET'}
+    result=dict(status='VERIFIED',label=market['bucket'],lower_f=str(low) if low is not None else None,
+                upper_f=str(high) if high is not None else None,
                 lower_inclusive=True,upper_inclusive=False,rule='NEAREST_WHOLE_F_HALF_UP',rules_sha256=market['rules_sha256'])
     if observed_f is not None:
         obs=Decimal(observed_f)
-        result.update(lower_minus_observed_f=str(low-obs),upper_minus_observed_f=str(high-obs),
-                      next_boundary_f=next((str(b)for b in (low,high)if b>obs),None))
+        result.update(lower_minus_observed_f=str(low-obs) if low is not None else None,
+                      upper_minus_observed_f=str(high-obs) if high is not None else None,
+                      next_boundary_f=next((str(b)for b in (low,high)if b is not None and b>obs),None))
     if peak_f is not None:
-        result.update(lower_minus_peak_f=str(low-Decimal(peak_f)),upper_minus_peak_f=str(high-Decimal(peak_f)))
+        result.update(lower_minus_peak_f=str(low-Decimal(peak_f)) if low is not None else None,
+                      upper_minus_peak_f=str(high-Decimal(peak_f)) if high is not None else None)
     return result
 
 

@@ -254,7 +254,9 @@ with CatalogueStore(cfg,session=False) as s:
  print(json.dumps(fingerprint(s.c)))
 '''
     from dataclasses import asdict
-    result = subprocess.run([sys.executable, '-B', '-c', script, str(base), json.dumps(asdict(cfg)),
+    old_config=asdict(cfg)
+    old_config.pop('us_lamp_enabled')
+    result = subprocess.run([sys.executable, '-B', '-c', script, str(base), json.dumps(old_config),
                              json.dumps(expected), str(AT)], capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout+result.stderr
     with CatalogueStore(cfg, session=False) as s:

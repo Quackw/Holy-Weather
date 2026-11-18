@@ -300,18 +300,24 @@ class Store:
                 if self.connected:self.pending_baselines.setdefault(sample['token'],time.monotonic())
         return result
 
-    def lamp_state(self):
-        row=self.c.execute("select value from meta where key='lamp_context_v1'").fetchone()
+    def lamp_state(self,market=None):
+        key='lamp_context_v1'
+        if getattr(self.cfg,'us_lamp_enabled',False):
+            if market is None:raise ValueError('LAMP_MARKET_REQUIRED')
+            key+=':'+market['station']+':'+market['date']
+        row=self.c.execute('select value from meta where key=?',(key,)).fetchone()
         return json.loads(row[0]) if row else {}
 
     def lamp_status(self):
         return self.lamp_state().get('status','NOT_RECEIVED')
 
-    def record_lamp(self,receipt,market,available_ms):
+    def record_lamp(self,receipt,market,available_ms,*,markets=None):
         from .lamp import update
-        if not self.cfg.lamp_context:raise ValueError('LAMP_NOT_ENABLED')
-        previous_lamp=self.lamp_state()
-        if self.cfg.lamp_alert_enabled and available_ms<previous_lamp.get("poll_available_ms",-1):
+        regional=getattr(self.cfg,'us_lamp_enabled',False)
+        if not self.cfg.lamp_context and not regional:raise ValueError('LAMP_NOT_ENABLED')
+        key='lamp_context_v1'+(':'+market['station']+':'+market['date'] if regional else '')
+        previous_lamp=self.lamp_state(market)
+        if (self.cfg.lamp_alert_enabled or regional) and available_ms<previous_lamp.get("poll_available_ms",-1):
             raise ValueError("LAMP_ALERT_CLOCK_REVERSED")
         state=update(previous_lamp,receipt,market,available_ms)
         raw=canonical(dict(receipt=receipt,available_ms=available_ms,status=state['status'],duplicate=state['duplicate'])).encode()
@@ -319,8 +325,8 @@ class Store:
         with self.transaction():
             used=self.c.execute("select coalesce(sum(length(raw)),0) from inputs where identity like 'LAMP:%'").fetchone()[0]
             if used+len(compressed)>1024*1024:
-                self.c.execute("insert or replace into meta values('lamp_context_v1',?)",
-                               (canonical(dict(self.lamp_state(),status='LAMP_STATE_BOUND')),))
+                self.c.execute('insert or replace into meta values(?,?)',
+                               (key,canonical(dict(previous_lamp,status='LAMP_STATE_BOUND'))))
                 return
             identity='LAMP:'+sha(raw)
             self.c.execute('insert or ignore into inputs(identity,received_ms,raw,raw_sha) values(?,?,?,?)',
@@ -328,18 +334,26 @@ class Store:
             ident=self.c.execute('select id from inputs where identity=?',(identity,)).fetchone()[0]
             if not state['duplicate']:state['input_id']=ident
             state['poll_input_id']=ident
-            self.c.execute("delete from latest where kind='lamp'")
-            for label,ref in (('__LAMP__',state['input_id']),('__LAMP_POLL__',ident)):
+            suffix=':'+key if regional else ''
+            labels=('__LAMP__'+suffix,'__LAMP_POLL__'+suffix)
+            self.c.execute('delete from latest where token in (?,?)',labels)
+            for label,ref in zip(labels,(state['input_id'],ident)):
                 self.c.execute('insert into latest values(?,?,?)',(label,'lamp',ref))
-            self.c.execute("insert or replace into meta values('lamp_context_v1',?)",(canonical(state),))
-            if self.cfg.lamp_alert_enabled:
+            self.c.execute('insert or replace into meta values(?,?)',(key,canonical(state)))
+            if self.cfg.lamp_alert_enabled or regional:
                 from .lamp_alert import record
-                record(self,market,state,available_ms)
+                for contract in markets or [market]:
+                    if (contract['station'],contract['date'])!=(market['station'],market['date']):
+                        raise ValueError('LAMP_CONTRACT_STATION_DATE_MISMATCH')
+                    record(self,contract,state,available_ms,
+                           key='lamp_alert_v1:'+contract['condition_id'].lower() if regional else 'lamp_alert_v1')
 
-    def price_context(self,at_ms):
-        bound=self.c.execute('select payload from market where id=1').fetchone()
-        if not bound:return {}
-        market=json.loads(bound[0]);snapshot=self.observation_snapshot(now_ms=at_ms)
+    def price_context(self,at_ms,market=None):
+        if market is None:
+            bound=self.c.execute('select payload from market where id=1').fetchone()
+            if not bound:return {}
+            market=json.loads(bound[0])
+        snapshot=self.observation_snapshot(now_ms=at_ms,market=market)
         rows={r['token']:r for r in snapshot['latest'] if r['kind']!='last_trade_price'}
         result={}
         for side,token in market['tokens'].items():
@@ -430,7 +444,7 @@ class Store:
         if self.cfg.lamp_context:result['forecast_card']=self.forecast_card(now_ms)
         return result
 
-    def observation_snapshot(self, *, now_ms=None):
+    def observation_snapshot(self, *, now_ms=None, market=None):
         # Periodic health checks read only latest rows, not the entire history.
         now_ms=int(time.time()*1000) if now_ms is None else now_ms
         result={'latest': [dict(r) for r in self.c.execute("select s.* from latest l join samples s on s.input_id=l.input_id where l.kind!='price_alert' order by s.token,s.kind")]}
@@ -445,10 +459,13 @@ class Store:
                 row['source_clock_tolerance_ms']=self.cfg.source_clock_tolerance_ms
             row['quote_usable_now']=(row['kind']!='last_trade_price' and self.quote_status(row['status'])=='FRESH'
                                      and row['ask'] is not None and row['bid'] is not None and row['freshness_now']=='FRESH')
-        market=self.c.execute('select payload from market where id=1').fetchone()
-        tokens=json.loads(market[0])['tokens'] if market else {}
+        if market is None:
+            bound=self.c.execute('select payload from market where id=1').fetchone()
+            market=json.loads(bound[0]) if bound else None
+        tokens=market['tokens'] if market else {}
         quotes={r['token']:r for r in result['latest'] if r['kind']!='last_trade_price'}
-        closed=bool(self.c.execute("select 1 from meta where key='market_closed'").fetchone())
+        closed_key=self.closed_key({'kind':'market_resolved','raw':{'market':market['condition_id']}}) if market else 'market_closed'
+        closed=bool(self.c.execute('select 1 from meta where key=?',(closed_key,)).fetchone())
         sides={}
         for side, token in tokens.items():
             row=quotes.get(token)
