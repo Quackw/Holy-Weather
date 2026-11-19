@@ -369,6 +369,10 @@ class DayDiscovery:
     """Revalidate on restart/date change; bounded retries only for known unavailability."""
     def __init__(self, store, discover, clock, session_day=None):
         self.store=store;self.discover=discover;self.clock=clock
+        # Europe's ten zones exceed ZoneInfo's eight-entry strong cache. Keep
+        # them alive for this worker, avoiding TZif rereads on every frame.
+        self._zones=({v[2]:ZoneInfo(v[2]) for v in store.cfg.cities.values()}
+                     if store.cfg.region=='europe' else {})
         self.session_day=session_day
         self.days={};self.selected=set();self.results={};self.retry={}
 
