@@ -345,7 +345,7 @@ class Store:
                 for contract in markets or [market]:
                     if (contract['station'],contract['date'])!=(market['station'],market['date']):
                         raise ValueError('LAMP_CONTRACT_STATION_DATE_MISMATCH')
-                    record(self,contract,state,available_ms,
+                    record(self,contract,state,available_ms,verified_markets=markets or (),
                            key='lamp_alert_v1:'+contract['condition_id'].lower() if regional else 'lamp_alert_v1')
 
     def price_context(self,at_ms,market=None):
