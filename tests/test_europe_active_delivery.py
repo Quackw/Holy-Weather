@@ -106,13 +106,17 @@ def test_native_pong_with_mature_queue_under_burst(gamma, tmp_path, native_limit
                     pass  # Expected when the deliberately overloaded baseline closes.
             producer = threading.Thread(target=produce)
             try:
-                client.start_keepalive()
                 if native_limits:
-                    time.sleep(9.90)  # Identical backlog immediately ahead of the 10s native ping.
-                producer.start()
-                # Drain while the peer produces: on Linux its finite send buffer
-                # can fill before keepalive, so waiting here would stall the test
-                # peer rather than exercise the application's receive work.
+                    # Prove the whole pulse is queued before native keepalive,
+                    # without depending on a scheduler's 100ms timing margin.
+                    producer.start()
+                    producer.join(2)
+                    assert not producer.is_alive()
+                    client.start_keepalive()
+                    assert seen.wait(12)  # Native 10s PING; peer has sent PONG.
+                else:
+                    client.start_keepalive()
+                    producer.start()
                 for i, frame in enumerate(frames):
                     if client.protocol.close_sent:
                         break
