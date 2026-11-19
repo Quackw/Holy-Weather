@@ -76,6 +76,7 @@ class Plan:
 
     def value(self):
         value=dict(config=asdict(self.config),session_day=self.session_day,deadline_ms=self.deadline_ms,phase_seconds=self.phase_seconds,archive_dir=self.archive_dir)
+        if not self.config.catalogue_metar_enabled:value['config'].pop('catalogue_metar_enabled',None)
         if not self.config.us_lamp_enabled:value['config'].pop('us_lamp_enabled',None)
         if self.continuous:value['continuous']=True  # Preserve every old finite plan/hash.
         if self.history_storage is not None:value['history_storage']=self.history_storage.value()

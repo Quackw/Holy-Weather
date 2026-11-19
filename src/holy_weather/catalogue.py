@@ -104,9 +104,12 @@ class CatalogueConfig(Config):
     price_alert_enabled: bool = True
     alert_queue_enabled: bool = True
     us_lamp_enabled: bool = False
+    catalogue_metar_enabled: bool = False
 
     def __post_init__(self):
         super().__post_init__()
+        if type(self.catalogue_metar_enabled) is not bool:
+            raise ValueError('CATALOGUE_METAR_FLAG')
         if self.region not in ('us','europe'):raise ValueError('CATALOGUE_REGION')
         if type(self.us_lamp_enabled) is not bool or self.us_lamp_enabled and self.region!='us':
             raise ValueError('CATALOGUE_LAMP_REQUIRES_US')
@@ -445,7 +448,7 @@ class DayDiscovery:
 
 def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=None, token=None,
                       clock=None, monotonic=time.monotonic, stop=None, wait=None, progress=None, session_day=None,
-                      on_sender_status=None,rotate_bytes=None,lamp_fetch=None):
+                      on_sender_status=None,rotate_bytes=None,lamp_fetch=None,metar_fetch=None):
     """Finite session with local-day revalidation; no service or extended deadline."""
     import threading
     from websockets.exceptions import WebSocketException
@@ -463,7 +466,24 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
     if cfg.us_lamp_enabled:
         from .us_lamp import Collection,fetch_cycle
         lamp=Collection(lamp_fetch or fetch_cycle)
-    result={'cities':{},'state':'PREPARING','telegram_enabled':cfg.telegram_enabled,'weather_enabled':False}
+    metar = None
+    if cfg.catalogue_metar_enabled:
+        from .catalogue_metar import MetarCollection
+        from .weather import fetch_weather
+        metar = MetarCollection(cfg.cities, metar_fetch or fetch_weather)
+
+    def tick_metar():
+        at = clock()
+        station = metar.tick(store, at)
+        if station and lamp:
+            markets = [m for condition, m in store.markets.items()
+                       if m['station'] == station and condition in selected and store.active(condition, at)]
+            if markets:
+                from .city_peak import record
+                with store.transaction():
+                    record(store, markets, store.lamp_state(markets[0]), at)
+
+    result={'cities':{},'state':'PREPARING','telegram_enabled':cfg.telegram_enabled,'weather_enabled':metar is not None}
     reported_sender=None
     def sender_status():
         nonlocal reported_sender
@@ -500,6 +520,7 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
                     selected=days.selected;result['cities']=days.results
                     router.selected=set(selected)
                     for condition in selected:router.per_market.setdefault(condition,Counter())
+                if metar:tick_metar()
                 if lamp:lamp.tick(store,selected,clock())
                 tokens=[t for t,c in store.tokens.items() if c in selected and store.active(c,clock())]
                 if not tokens:
@@ -556,6 +577,7 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
                             # the bounded receiver, including native PONG reads.
                             if monotonic()>=next_delivery:
                                 delivery_start=monotonic()
+                                if metar:tick_metar()
                                 if lamp:lamp.tick(store,selected,clock())
                                 # Always recheck lifecycle immediately before send,
                                 # including between throttled global market scans.
@@ -625,6 +647,7 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
             if lamp and result['state'] in ('NETWORK_GAP_NO_RETRY','RECONNECT_BUDGET_EXHAUSTED','NETWORK_REFUSED_NO_RETRY'):
                 while not stopped():
                     progress('OBSERVING')
+                    if metar:tick_metar()
                     lamp.tick(store,selected,clock())
                     store.expire_closed_deliveries(clock())
                     if sender:sender.tick(store,clock());sender_status()
@@ -667,6 +690,7 @@ def main():
     parser.add_argument('--region',choices=('europe','us'),default='europe')
     parser.add_argument('--seconds',type=int,default=120)
     parser.add_argument('--send',action='store_true')
+    parser.add_argument('--catalogue-metar',action='store_true',help='Collect regional station METAR; combine with US LAMP for one city card')
     parser.add_argument('--us-lamp',action='store_true',help='Opt in to independent NOAA LAMP for the US catalogue')
     parser.add_argument('--price-notification-filter',action='store_true',
                         help='Fast 70/80 delivery, ask-only bid confirmation, and ordinary same-side batches')
@@ -676,7 +700,7 @@ def main():
     cfg=CatalogueConfig(region=args.region,city='new-york' if args.region=='us' else 'london',
                         data_dir=args.data_dir,duration_seconds=args.seconds,telegram_enabled=args.send,
                         price_notification_filter=args.price_notification_filter,price_batch_seconds=args.price_batch_seconds,
-                        us_lamp_enabled=args.us_lamp)
+                        us_lamp_enabled=args.us_lamp,catalogue_metar_enabled=args.catalogue_metar)
     result=observe_catalogue(cfg,token=token_from_env() if args.send else None,stop=stop)
     print(json.dumps(result,ensure_ascii=False,sort_keys=True))
     return 0 if result['state']=='COMPLETED_WINDOW' else 2

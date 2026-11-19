@@ -81,3 +81,45 @@ this code in a PR.
 
 [NOAA LAMP product inventory](https://www.nco.ncep.noaa.gov/pmb/products/lmp/)
 and [MDL NWS webservices](https://vlab.noaa.gov/web/mdl/lamp-nws-webservices).
+
+## Regional METAR and the US pre-peak card
+
+Set `catalogue_metar_enabled=true` in the regional catalogue plan (CLI
+`--catalogue-metar`). Both regions use the exact ICAO and timezone from their
+city catalogue. Europe collects METAR only. In the US, combining this option
+with `us_lamp_enabled` selects the city card instead of per-bucket LAMP notices.
+Existing plans omit the new option. No migration or re-rendering is required.
+
+A single background reader per regional observer staggers the official AWC
+24-hour JSON requests over five minutes. The existing station decoder checks the
+raw station, UTC timestamp and temperature. A bounded projection per station
+retains local-day reports, corrections, source, receipt and availability times.
+The poll cursor survives worker handoffs. HTTP 401, 403 or 429 blocks further
+AWC requests for that region. Other failures leave a station status and the
+next scheduled slot. AWC has no SQLite writer, Telegram sender or service.
+
+The first LAMP issue for the station and local date establishes a baseline.
+A later issue can produce one card while the forecast still shows warming.
+Either a new forecast or a new METAR can complete the evidence. Require a
+fresh observation, routine reports covering each completed local hour and
+forecast values for every remaining local hour. Use UTC slots across DST.
+Peak time is the first remaining hour at the forecast maximum, shown at the
+airport. Remaining warming is the forecast peak minus the latest observation.
+The estimated daily bucket uses the higher of the remaining peak and the
+largest observed routine METAR value. For the latter, use the original T
+remark when present, otherwise the raw whole Celsius group. SPECI can show
+the current temperature but cannot raise the qualifying maximum.
+
+Match one verified open bucket for this station, date and event, using full
+precision before formatting. Missing coverage, stale data, an ambiguous market
+or no remaining warming produces no Telegram card. A single transaction freezes
+the forecast and METAR evidence, selected market, city/day decision and queue
+admission. A repeat, later issue, restart or another bucket cannot enqueue a
+second card that day. The delivery window ends by the forecast peak and the
+METAR freshness deadline. Raw observations cover sampled times only. The daily
+bucket is an estimate until the market resolves.
+
+To return to the previous behaviour, omit the METAR option in a future
+approved plan transition. Existing events, queue receipts and PRICE thresholds
+remain in the same SQLite schema. The reference source is the
+[NOAA Aviation Weather Center data API](https://aviationweather.gov/data/api/).

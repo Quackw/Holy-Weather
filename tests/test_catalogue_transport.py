@@ -403,7 +403,7 @@ def test_receive_observation_is_bounded_and_optional_faults_do_not_break_frames(
 
 
 def test_previous_reader_keeps_new_metrics_events_and_receipts(gamma,tmp_path):
-    from dataclasses import asdict
+    from holy_weather.recovery import Plan
     import os,subprocess,sys
     from pathlib import Path
     from holy_weather.alert_queue import preview,claim,finish
@@ -440,8 +440,7 @@ with CatalogueStore(CatalogueConfig(**v),session=False) as s:
  'state':[tuple(x) for x in s.c.execute(\"select key,value from meta where key like 'price_alert_v1:%' or key like 'alert_delivery_v1:%' order by key\")]}))
 """
     env=dict(os.environ,PYTHONPATH=str(old),PYTHONDONTWRITEBYTECODE='1')
-    old_config=asdict(cfg)
-    old_config.pop('us_lamp_enabled')
+    old_config=Plan(cfg,None,None,continuous=True).value()['config']
     result=json.loads(subprocess.check_output([sys.executable,'-B','-c',script,json.dumps(old_config),json.dumps(metrics),str(AT+6)],env=env,text=True))
     assert result==json.loads(json.dumps(before))
     with CatalogueStore(cfg,session=False) as store:

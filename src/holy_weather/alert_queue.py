@@ -39,6 +39,10 @@ def card(event,market,at,*,verified_markets=()):
             raise ValueError('EXACT_BUCKET_LINK_REQUIRED')
         lines=render(event,market,verified_markets)
         expires=event['current_forecast']['issue_ms']+7200000
+        if 'city_outlook' in event:
+            from .weather import WEATHER_AGE_MS
+            outlook=event['city_outlook']
+            expires=min(expires,outlook['peak_ms']-1,outlook['observed_ms']+WEATHER_AGE_MS-1)
     text='\n'.join(lines)
     if len(text)>3500:raise ValueError('CARD_BOUND')
     return text,expires
