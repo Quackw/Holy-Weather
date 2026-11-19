@@ -101,7 +101,7 @@ AWC requests for that region. Other failures leave a station status and the
 next scheduled slot. AWC has no SQLite writer, Telegram sender or service.
 
 The first LAMP issue for the station and local date establishes a baseline.
-A later issue can produce one card while the forecast still shows warming.
+A later issue can produce at most one card while the forecast still shows warming.
 Either a new forecast or a new METAR can complete the evidence. Require a
 fresh observation, routine reports covering each completed local hour and
 forecast values for every remaining local hour. Use UTC slots across DST.
@@ -120,6 +120,45 @@ admission. A repeat, later issue, restart or another bucket cannot enqueue a
 second card that day. The delivery window ends by the forecast peak and the
 METAR freshness deadline. Raw observations cover sampled times only. The daily
 bucket is an estimate until the market resolves.
+
+### Local send window
+
+The city card waits until **08:00 inclusive to 20:00 exclusive at the airport**
+and until the first remaining forecast maximum is **at most three hours away**.
+UTC hours, local dates and DST are evaluated from the original issue and current
+station timezone. The remaining forecast maximum must also be at least the
+already observed routine maximum; a lower secondary warm-up does not qualify
+as a pre-peak city card. The original forecast comparison's 2°F threshold and
+PRICE rules are unchanged.
+
+Waiting creates no event or queue item and does not occupy the station/day
+slot. Its reason is stored only when it changes. The existing METAR completion
+path can admit the retained fresh forecast when the window opens; it does not
+need another NOAA issue or an additional timer, fetch, service or database.
+Forecast age, observation age, hourly coverage and verified market checks remain
+mandatory. A late start, missed window or unsuitable data can leave a city
+without a card; the policy does not fabricate or backfill a signal.
+
+New city events retain a `delivery_window` audit object. Their queue expiry is
+also capped at 20:00 local minus one millisecond, in addition to the existing
+issue-age, observation-age, forecast-peak and contract-day deadlines. Claim and
+the immediate pre-HTTP check enforce that expiry, even after pacing/queue delay.
+This constrains request start; an external Telegram response can arrive later.
+If a new-policy city card expires after claim but before HTTP, its known local
+rejection stays terminal and leaves the shared sender available for PRICE.
+No HTTP was attempted in that case. UNKNOWN and API failures retain the existing
+sender-disable behavior; this exception does not apply to PRICE or legacy cards.
+
+Existing event IDs, city/day slots, text, expiry and SENT/UNKNOWN receipts are
+not rewritten or rearmed. Already recorded cards are not sent again on the
+same local day. Existing recovery expiry of unsent LAMP remains in force.
+Schema stays at v1; compatible older readers retain the new stored expiry.
+All ten US profiles are covered on ordinary dates and both DST transition dates.
+An offline integration test also applies only these LAMP changes to installed
+US source `67e2f63`, preserving its other source files and the PRICE/WebSocket
+fixes #40/#41. The existing US sender drain and pacing implementation is retained.
+No running observer is changed by accepting this code. Installation needs its
+separate exact approval and preserves the installed US fixes.
 
 To return to the previous behaviour, omit the METAR option in a future
 approved plan transition. Existing events, queue receipts and PRICE thresholds

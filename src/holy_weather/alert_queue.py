@@ -76,6 +76,8 @@ def card(event,market,at,*,verified_markets=()):
             from .weather import WEATHER_AGE_MS
             outlook=event['city_outlook']
             expires=min(expires,outlook['peak_ms']-1,outlook['observed_ms']+WEATHER_AGE_MS-1)
+            if 'delivery_window' in event:
+                expires=min(expires,event['delivery_window']['closes_ms']-1)
     text='\n'.join(lines)
     if len(text)>3500:raise ValueError('CARD_BOUND')
     return text,expires
@@ -192,6 +194,9 @@ def enqueue(store,event_id,event,market,at,*,verified_markets=()):
         admission('NOT_QUEUED','QUEUE_FULL');return
     value=dict(status='PENDING',track=event['type'],event_id=event_id,event_ms=at,html=html,
                expires_ms=expires,target=TARGET,market_date=market['date'],timezone=market['timezone'])
+    if (event['type']=='LAMP_ALERT' and 'city_outlook' in event
+            and event.get('delivery_window',{}).get('policy')=='US_CITY_PRE_PEAK_WINDOW_V1'):
+        value['delivery_policy']='US_CITY_PRE_PEAK_WINDOW_V1'
     if filtered:
         batch_ms=store.cfg.price_batch_seconds*1000
         value.update(event_ids=[event_id],side=event['side'],token=event['token'],batch_market=market['url'],batch_until_ms=at+batch_ms,
