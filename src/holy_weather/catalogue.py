@@ -446,9 +446,9 @@ class DayDiscovery:
         s.expire_closed_deliveries(self.clock(),self.selected)
 
 
-def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=None, token=None,
+def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=None, token=None, metar_fetch=None,
                       clock=None, monotonic=time.monotonic, stop=None, wait=None, progress=None, session_day=None,
-                      on_sender_status=None,rotate_bytes=None,lamp_fetch=None,metar_fetch=None):
+                      on_sender_status=None,rotate_bytes=None,lamp_fetch=None):
     """Finite session with local-day revalidation; no service or extended deadline."""
     import threading
     from websockets.exceptions import WebSocketException
@@ -647,9 +647,9 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
             if lamp and result['state'] in ('NETWORK_GAP_NO_RETRY','RECONNECT_BUDGET_EXHAUSTED','NETWORK_REFUSED_NO_RETRY'):
                 while not stopped():
                     progress('OBSERVING')
-                    if metar:tick_metar()
                     lamp.tick(store,selected,clock())
                     store.expire_closed_deliveries(clock())
+                    if metar:tick_metar()
                     if sender:sender.tick(store,clock());sender_status()
                     if wait(min(.25,max(0,deadline-monotonic()))):break
             progress('STOPPING')
