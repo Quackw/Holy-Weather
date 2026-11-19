@@ -77,13 +77,20 @@ def native_timing(ws):
     latency=getattr(ws,'latency',None)
     state=receive_queue_state(ws)
     observations,pauses,maximum=getattr(ws,'native_receive_observation',(None,None,None))
-    return {'native_last_pong_ms':getattr(ws,'native_last_pong_ms',None),
+    result={'native_last_pong_ms':getattr(ws,'native_last_pong_ms',None),
             'native_rtt_ms':round(latency*1000,3) if isinstance(latency,(int,float)) and latency>0 else None,
             'native_receive_queue':{
                 'frames':None if state is None else state['frames'],
                 'paused':None if state is None else state['paused'],
                 'max_observed_frames':maximum,'observations':observations,'paused_observations':pauses,
                 'socket_readable_bytes':socket_readable_bytes(ws)}}
+    diagnostic=getattr(ws,'diagnostic',None)
+    if diagnostic is not None:
+        result['diagnostic']=dict(armed=not diagnostic.owner.finished,
+            sampler_alive=bool(diagnostic.thread and diagnostic.thread.is_alive()),
+            dropped=diagnostic.owner.dropped_busy+diagnostic.owner.dropped_capacity,
+            faults=diagnostic.owner.faults)
+    return result
 
 
 def local_days(at, cities=None):
@@ -499,6 +506,12 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
     progress=progress or (lambda stage:None)
     progress('STARTING')
     with CatalogueStore(cfg) as store:
+        capture = None
+        if cfg.region=='europe':
+            from .ws_diagnostic import armed
+            capture = armed(store)
+        connection_type = capture.factory(TimedClientConnection) if capture else TimedClientConnection
+        if capture:result['websocket_diagnostic']=capture.result
         try:
             if sender:sender.restore_pacing(store)
             deadline=monotonic()+cfg.duration_seconds
@@ -538,8 +551,9 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
                 store.transport_record({'kind':'CONNECTING','at_ms':clock(),'attempt':reconnects+1},telemetry)
                 ws=None
                 try:
+                    if capture:capture.attempt=reconnects+1;capture.phase('CONNECT')
                     with connect(WS,proxy=None,open_timeout=10,close_timeout=2,ping_interval=10,ping_timeout=20,
-                                 max_size=262144,max_queue=16,compression=None,create_connection=TimedClientConnection) as ws:
+                                 max_size=262144,max_queue=16,compression=None,create_connection=connection_type) as ws:
                         tokens=[t for t in tokens if store.active(store.tokens[t],clock())]
                         if days.due():continue
                         if not tokens:
@@ -553,6 +567,7 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
                         last_ping=monotonic();last_pong=last_ping;next_stats=last_ping
                         next_maintenance=next_delivery=last_ping
                         while not stop.is_set() and monotonic()<deadline:
+                            if capture:capture.phase('HOUSEKEEPING')
                             progress('OBSERVING')
                             at=clock()
                             if rotate_bytes is not None and store.usage()>=rotate_bytes:
@@ -565,6 +580,7 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
                                 telemetry['subscribed_tokens']=len(live_tokens)
                                 subscribed+=16;next_subscription=monotonic()+1
                             if monotonic()>=next_maintenance:
+                                if capture:capture.phase('MARKETS')
                                 maintenance_start=monotonic()
                                 if not any(store.active(c,at) for c in selected):
                                     result['state']='ALL_MARKETS_CLOSED_OR_LOCAL_DATE_ENDED';break
@@ -575,10 +591,12 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
                                 telemetry['subscribed_tokens']=len(live_tokens)
                                 telemetry['maintenance_ms_max']=max(telemetry['maintenance_ms_max'],round((monotonic()-maintenance_start)*1000,3))
                                 next_maintenance=monotonic()+.25
+                                if capture:capture.phase('HOUSEKEEPING')
                             # Drain market frames between delivery scans. Repeating
                             # global queue transactions per frame can backpressure
                             # the bounded receiver, including native PONG reads.
                             if monotonic()>=next_delivery:
+                                if capture:capture.phase('DELIVERY')
                                 delivery_start=monotonic()
                                 if metar:tick_metar()
                                 if lamp:lamp.tick(store,selected,clock())
@@ -592,23 +610,30 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
                                 telemetry['delivery_ms_total']+=elapsed
                                 telemetry['delivery_ms_max']=max(telemetry['delivery_ms_max'],elapsed)
                                 next_delivery=monotonic()+.05
+                                if capture:capture.phase('HOUSEKEEPING')
                             if monotonic()>=next_stats:
+                                if capture:capture.phase('STATS')
                                 if hasattr(progress,'observation'):progress.observation(store.runtime_status(at))
                                 store.set_meta('catalogue_counters',{'router':dict(router.counters),'markets':{k:dict(v) for k,v in router.per_market.items()}})
                                 telemetry['subscribed_tokens']=len(live_tokens)
                                 telemetry.update(native_timing(ws))
                                 store.transport_record(snapshot=telemetry)
                                 next_stats=monotonic()+10
+                                if capture:capture.phase('HOUSEKEEPING')
                             if monotonic()-last_pong>25:raise TimeoutError('APPLICATION_HEARTBEAT_TIMEOUT')
                             if monotonic()-last_ping>=10:
+                                if capture:capture.phase('APP_PING')
                                 ws.send('PING');last_ping=monotonic();telemetry['application_last_ping_ms']=clock()
+                            if capture:capture.phase('RECV')
                             try:raw=ws.recv(timeout=min(1,max(.001,min(deadline,next_delivery)-monotonic())))
                             except TimeoutError:continue
                             if raw=='PONG':
                                 last_pong=monotonic();telemetry['application_last_pong_ms']=clock();continue
                             telemetry['last_frame_ms']=clock()
                             telemetry['frames']+=1
-                            telemetry['max_frame_bytes']=max(telemetry['max_frame_bytes'],len(raw.encode()) if isinstance(raw,str) else len(raw))
+                            frame_bytes=len(raw.encode()) if isinstance(raw,str) else len(raw)
+                            telemetry['max_frame_bytes']=max(telemetry['max_frame_bytes'],frame_bytes)
+                            if capture:capture.frame(frame_bytes);capture.phase('ROUTER')
                             processing_start=monotonic()
                             try:router.feed(raw,clock())
                             finally:
@@ -625,9 +650,16 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
                     close=getattr(exc,'rcvd',None) or getattr(exc,'sent',None)
                     transient=isinstance(exc,(OSError,TimeoutError,ConnectionClosed))
                     if close is not None and close.code in (1008,1009):transient=False
-                    store.transport_record({'kind':'DISCONNECTED','at_ms':clock(),'attempt':reconnects+1,
+                    disconnected_at=clock()
+                    evidence=None
+                    if capture and not capture.finished and any(
+                            getattr(getattr(exc,side,None),'code',None)==1011 for side in ('sent','rcvd')):
+                        evidence=capture.persist(store,exc) or capture.result
+                        result['websocket_diagnostic']=evidence
+                        capture=None
+                    store.transport_record({'kind':'DISCONNECTED','at_ms':disconnected_at,'attempt':reconnects+1,
                         'error':type(exc).__name__,'detail':str(exc),'close_code':close.code if close else None,
-                        'transient':transient},telemetry)
+                        'transient':transient,**({'diagnostic':evidence} if evidence else {})},telemetry)
                     if not transient:
                         result['state']='NETWORK_REFUSED_NO_RETRY';break
                     if reconnects>=cfg.max_reconnects:
