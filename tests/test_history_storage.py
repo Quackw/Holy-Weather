@@ -353,8 +353,13 @@ def test_previous_runtime_with_compatible_reader_keeps_new_rows_and_queue(gamma,
             dest=old/Path(name).relative_to('src');dest.parent.mkdir(parents=True,exist_ok=True)
             dest.write_bytes(subprocess.check_output(['git','show',base+':'+name]))
     # Keep the reader/retired-token gate required by data already archived.
-    for name in ('history.py','history_files.py','history_retention.py','catalogue.py'):
+    for name in ('history.py','history_files.py','history_retention.py'):
         (old/'holy_weather'/name).write_bytes((Path(__file__).resolve().parents[1]/'src/holy_weather'/name).read_bytes())
+    # Pin the accepted retired-token gate, not a future catalogue paired with
+    # this historical binary's queue module. Exact current-main rollback is
+    # exercised separately in test_europe_active_delivery.py.
+    (old/'holy_weather/catalogue.py').write_bytes(subprocess.check_output([
+        'git','show','04ab3cf99b7257195499a53051488ee4e375d2ab:src/holy_weather/catalogue.py']))
     cfg=tmp_path/'config.json';cfg.write_text(canonical(plan.value()['config']))
     code="""import json,sys
 from holy_weather.catalogue import CatalogueConfig,CatalogueStore
