@@ -220,8 +220,10 @@ def reset(state):
     return state
 
 
-def evolve(previous, sample, cfg):
-    state = deepcopy(previous or {'points': [], 'excursion': None, 'last_source': None, 'gates': {}})
+def evolve(previous, sample, cfg, *, owned=False):
+    # Storage just decoded this private state inside its transaction. Public
+    # callers keep the original copy semantics; neither path changes the rules.
+    state = previous if owned and previous else deepcopy(previous or {'points': [], 'excursion': None, 'last_source': None, 'gates': {}})
     if sample['kind'] == 'last_trade_price':
         return state, [], 'TRADE_RECORDED'
     clock_status=quote_clock_status(cfg,sample['source_ms'],sample['received_ms'],sample['received_ms'])
@@ -264,7 +266,8 @@ def evolve(previous, sample, cfg):
         elif point['received_ms'] > peak['received_ms'] and (decimal(peak['ask'])-value)*sign >= abs(decimal(peak['ask'])-decimal(origin['ask']))*decimal(cfg.return_fraction):
             events.append({'type':'RETURN','status':'DETECTED','evidence':[origin,peak,point]});excursion=None
     if not excursion:
-        origin = next((p for p in points if abs(value-decimal(p['ask'])) >= decimal(cfg.move)), None)
+        distance = decimal(cfg.move)
+        origin = next((p for p in points if abs(value-decimal(p['ask'])) >= distance), None)
         if origin:
             events.append({'type':'MOVE','status':'DETECTED','evidence':[origin,point]});excursion={'origin':origin,'peak':point}
     if last and decimal(last['ask']) == value:
