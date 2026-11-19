@@ -100,12 +100,15 @@ def test_native_pong_with_mature_queue_under_burst(gamma, tmp_path, native_limit
                 if native_limits:
                     time.sleep(9.90)  # Identical backlog immediately ahead of the 10s native ping.
                 producer.start()
-                assert seen.wait(2)
+                # Drain while the peer produces: on Linux its finite send buffer
+                # can fill before keepalive, so waiting here would stall the test
+                # peer rather than exercise the application's receive work.
                 for i, frame in enumerate(frames):
                     if client.protocol.close_sent:
                         break
                     assert client.recv(timeout=2) == frame
                     router.feed(frame, AT+i)
+                assert seen.wait(2)
                 if indexed:
                     assert router.counters['routed_messages'] == count
                     # An acknowledged native ping also covers the final receive batch.
