@@ -652,7 +652,8 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
                     if close is not None and close.code in (1008,1009):transient=False
                     disconnected_at=clock()
                     evidence=None
-                    if capture and close is not None and close.code==1011 and not capture.finished:
+                    if capture and not capture.finished and any(
+                            getattr(getattr(exc,side,None),'code',None)==1011 for side in ('sent','rcvd')):
                         evidence=capture.persist(store,exc) or capture.result
                         result['websocket_diagnostic']=evidence
                         capture=None

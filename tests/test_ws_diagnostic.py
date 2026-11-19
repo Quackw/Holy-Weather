@@ -222,7 +222,8 @@ def test_full_catalogue_price_and_queue_equal_with_capture_off_on(gamma,tmp_path
     assert outputs[0]==outputs[1]
 
 
-def test_full_observer_persists_once_and_keeps_reconnect_budget_and_fired(gamma,tmp_path):
+@pytest.mark.parametrize('received',[None,1000])
+def test_full_observer_persists_once_and_keeps_reconnect_budget_and_fired(gamma,tmp_path,received):
     from websockets.exceptions import ConnectionClosedError
     from websockets.frames import Close
     cfg,markets=setup(gamma,tmp_path,1);market,receipt=markets[0]
@@ -237,7 +238,8 @@ def test_full_observer_persists_once_and_keeps_reconnect_budget_and_fired(gamma,
             ticks[0]+=.01;self.index+=1
             if self.index<=2:return message(market,market['tokens']['YES'],
                 '0.49' if self.index==1 else '0.81',AT+int(ticks[0]*1000))
-            raise ConnectionClosedError(None,Close(1011,'keepalive ping timeout'))
+            raise ConnectionClosedError(Close(received,'') if received is not None else None,
+                Close(1011,'keepalive ping timeout'),False if received is not None else None)
     def connect(*args,**kwargs):
         assert kwargs['ping_interval']==10 and kwargs['ping_timeout']==20 and kwargs['max_queue']==16
         calls.append(1);return WS()
@@ -250,6 +252,8 @@ def test_full_observer_persists_once_and_keeps_reconnect_budget_and_fired(gamma,
     assert len(errors)==4 and sum('diagnostic' in r for r in errors)==1
     path=Path(cfg.data_dir)/diagnostic.OUTPUT
     original=path.read_bytes()
+    header,_,_=records(path)
+    assert header['sent_close']==1011 and header['received_close']==received
     with CatalogueStore(cfg,session=False) as store:
         assert diagnostic.armed(store) is None
         assert json.loads(store.c.execute("select value from meta where key like 'price_alert_v1:%'").fetchone()[0])['fired']==[

@@ -17,7 +17,7 @@ The application never uses an environment or credential fallback to enable it.
 
 Without the request: no recorder, sampler or trace file. US never arms it.
 With it: one recorder follows the existing worker's connections. At the next
-recorded code 1011, the main owner saves `ws-diagnostic-v1.jsonl` and the existing
+sent or received code 1011, the main owner saves `ws-diagnostic-v1.jsonl` and the existing
 DISCONNECTED metadata record gains only the file name, size, SHA and status.
 There is no per-frame SQLite diagnostic write or second SQLite writer.
 Recording stops after that attempt; later connections use the original class.
