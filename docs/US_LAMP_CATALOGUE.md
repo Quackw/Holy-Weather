@@ -94,6 +94,8 @@ A single background reader per regional observer staggers the official AWC
 24-hour JSON requests over five minutes. The existing station decoder checks the
 raw station, UTC timestamp and temperature. A bounded projection per station
 retains local-day reports, corrections, source, receipt and availability times.
+When the local day changes the final collected projection moves to one compressed
+input in the existing history, atomically with the new station state.
 The poll cursor survives worker handoffs. HTTP 401, 403 or 429 blocks further
 AWC requests for that region. Other failures leave a station status and the
 next scheduled slot. AWC has no SQLite writer, Telegram sender or service.

@@ -208,3 +208,23 @@ def test_block_missing_ambiguous_and_closed_daily_bucket(gamma,tmp_path):
         s.record_lamp(f,m,at+2,markets=[m])
         assert get_status()=='MARKET_NOT_AVAILABLE'
         assert not events(s)
+
+
+def test_station_day_history_survives_rollover_and_restart(tmp_path):
+    import zlib
+    cfg=catalogue.CatalogueConfig(data_dir=str(tmp_path),catalogue_metar_enabled=True)
+    station,zone='EGLC','Europe/London'
+    cities={'london':EUROPE_CITIES['london']}
+    with catalogue.CatalogueStore(cfg,session=False) as store:
+        for at in (AT,AT+86400000,AT+86400000+300000):
+            reader=catalogue_metar.MetarCollection(cities,lambda station:observations(dict(station=station,timezone=zone),at))
+            reader.tick(store,at)
+            reader.worker.join(2)
+            assert reader.tick(store,at)==station
+        rows=store.c.execute('select raw,raw_sha from inputs').fetchall()
+        assert len(rows)==1
+        raw=zlib.decompress(rows[0][0])
+        assert sha(raw)==rows[0][1]
+        history=json.loads(raw)['projection']
+        assert history['day']=='2026-11-14' and history['records'][-1]['raw_metar'].startswith('METAR EGLC')
+        assert catalogue_metar.load(store,catalogue_metar.PREFIX+station)['day']=='2026-11-15'
