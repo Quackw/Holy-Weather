@@ -7,6 +7,8 @@ from collections import Counter
 from dataclasses import dataclass, fields
 from datetime import datetime, timezone
 import json
+import os
+import stat
 import time
 import zlib
 from zoneinfo import ZoneInfo
@@ -129,6 +131,20 @@ class CatalogueConfig(Config):
 
 
 class CatalogueStore(Store):
+    def usage(self):
+        if self.cfg.region!='us':return super().usage()
+        # Keep the exact per-transaction limit and reject every unexpected entry.
+        # DirEntry.stat(lstat) validates type and measures size in one syscall.
+        total=count=0
+        with os.scandir(self.root) as entries:
+            for entry in entries:
+                count+=1
+                info=entry.stat(follow_symlinks=False)
+                if count>32 or not stat.S_ISREG(info.st_mode):
+                    raise StorageStop('UNEXPECTED_DATA_DIRECTORY_CONTENT')
+                total+=info.st_size
+        return total
+
     def __init__(self, cfg, **kwargs):
         if not isinstance(cfg, CatalogueConfig):
             raise ValueError('CATALOGUE_CONFIG_REQUIRED')
@@ -456,6 +472,45 @@ class DayDiscovery:
         s.expire_closed_deliveries(self.clock(),self.selected)
 
 
+class USPriceRecovery:
+    """Request an authoritative book when fresh depth cannot advance PRICE.
+
+    No REST, extra connection or depth promotion. Only a normal confirmed book
+    or BBO can finish recovery. Unanswered requests are bounded per token.
+    """
+    def __init__(self, started):
+        self.started=started;self.next_scan=started;self.requested={};self.failures={}
+
+    def tick(self, store, ws, live_tokens, at, mono):
+        if mono<self.next_scan:return 0
+        self.next_scan=mono+1
+        prices={key[len('price_alert_v1:'):]:json.loads(raw).get('previous') for key,raw in
+                store.c.execute("select key,value from meta where key like 'price_alert_v1:%'")}
+        selected=[]
+        for token in sorted(live_tokens):
+            previous=prices.get(token)
+            if (token in store.price_alert_ready and previous
+                    and quote_clock_status(store.cfg,previous['source_ms'],previous['received_ms'],at)=='FRESH'):
+                self.failures.pop(token,None);continue
+            top=store.seen_tops.get(token)
+            if (mono-self.started<5 or not top or any(x is None for x in top['top'])
+                    or quote_clock_status(store.cfg,top['source_ms'],top['received_ms'],at)!='FRESH'
+                    or self.failures.get(token,0)>=3 or mono-self.requested.get(token,-1e30)<20
+                    or not store.active(store.tokens[token],at)):
+                continue
+            selected.append(token)
+            if len(selected)==16:break
+        for token in selected:
+            # Keep fired levels/high-water and refuse confirmation across this
+            # explicit gap. The first returned book/BBO is a baseline.
+            store.invalidate('PRICE_BASELINE_RECOVERY',at,token)
+            self.requested[token]=mono;self.failures[token]=self.failures.get(token,0)+1
+        if selected:
+            ws.send(canonical(dict(operation='unsubscribe',assets_ids=selected)))
+            ws.send(canonical(dict(operation='subscribe',assets_ids=selected,custom_feature_enabled=True)))
+        return len(selected)
+
+
 def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=None, token=None, metar_fetch=None,
                       clock=None, monotonic=time.monotonic, stop=None, wait=None, progress=None, session_day=None,
                       on_sender_status=None,rotate_bytes=None,lamp_fetch=None):
@@ -563,6 +618,7 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
                         store.transport_record({'kind':'CONNECTED','at_ms':clock(),'attempt':reconnects+1},telemetry)
                         ws.send(canonical({'type':'market','assets_ids':tokens[:16],'custom_feature_enabled':True}))
                         subscribed=min(16,len(tokens));live_tokens=set(tokens[:16]);next_subscription=monotonic()+1
+                        baseline_recovery=USPriceRecovery(monotonic()) if cfg.region=='us' else None
                         telemetry['subscribed_tokens']=len(live_tokens)
                         last_ping=monotonic();last_pong=last_ping;next_stats=last_ping
                         next_maintenance=next_delivery=last_ping
@@ -588,6 +644,9 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
                                 for start in range(0,len(closed),16):
                                     ws.send(canonical({'operation':'unsubscribe','assets_ids':closed[start:start+16]}))
                                 live_tokens.difference_update(closed)
+                                if baseline_recovery:
+                                    requests=baseline_recovery.tick(store,ws,live_tokens,at,monotonic())
+                                    telemetry['price_baseline_resubscriptions']=telemetry.get('price_baseline_resubscriptions',0)+requests
                                 telemetry['subscribed_tokens']=len(live_tokens)
                                 telemetry['maintenance_ms_max']=max(telemetry['maintenance_ms_max'],round((monotonic()-maintenance_start)*1000,3))
                                 next_maintenance=monotonic()+.25

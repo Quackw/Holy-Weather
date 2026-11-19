@@ -1,6 +1,7 @@
 """Pure causal quote/event rules; strings preserve exact decimal prices."""
 from copy import deepcopy
 from decimal import Decimal, InvalidOperation
+from functools import lru_cache
 import hashlib
 import json
 import math
@@ -53,6 +54,16 @@ def decimal(value, *, price=True):
     if result < 0 or (price and result > 1):
         raise ValueError('PRICE_OR_SIZE_RANGE')
     return result
+
+
+@lru_cache(maxsize=4096)
+def _cached_price(value):
+    return decimal(value)
+
+
+def cached_price(value):
+    """Bounded immutable values for the US research hot path; same validation."""
+    return _cached_price(value) if type(value) is str else decimal(value)
 
 
 @dataclass(frozen=True)
@@ -220,8 +231,10 @@ def reset(state):
     return state
 
 
-def evolve(previous, sample, cfg):
-    state = deepcopy(previous or {'points': [], 'excursion': None, 'last_source': None, 'gates': {}})
+def evolve(previous, sample, cfg, *, owned=False, decimal_parser=None):
+    # Storage owns the just-decoded object. Public callers retain copy semantics.
+    state = previous if owned and previous else deepcopy(previous or {'points': [], 'excursion': None, 'last_source': None, 'gates': {}})
+    number = decimal_parser or decimal
     if sample['kind'] == 'last_trade_price':
         return state, [], 'TRADE_RECORDED'
     clock_status=quote_clock_status(cfg,sample['source_ms'],sample['received_ms'],sample['received_ms'])
@@ -231,20 +244,20 @@ def evolve(previous, sample, cfg):
     if status != 'FRESH':
         return reset(state), [], status
     point = {k: sample[k] for k in ('source_ms', 'received_ms', 'ask', 'input_id')}
-    value = decimal(point['ask']); events = []
+    value = number(point['ask']); events = []
     points = [p for p in state['points'] if 0 <= point['received_ms']-p['received_ms'] <= cfg.window_seconds*1000
               and 0 <= point['source_ms']-p['source_ms'] <= cfg.window_seconds*1000]
     last = points[-1] if points else None
     for level in cfg.levels:
         gate = state['gates'].setdefault(level, {'UP': True, 'DOWN': True, 'last_ms': None})
-        threshold, distance = decimal(level), decimal(cfg.hysteresis)
+        threshold, distance = number(level), number(cfg.hysteresis)
         if value <= threshold-distance:
             gate['UP'] = True
         if value >= threshold+distance:
             gate['DOWN'] = True
         if not last:
             continue
-        before = decimal(last['ask'])
+        before = number(last['ask'])
         direction = 'UP' if before < threshold <= value else 'DOWN' if value < threshold <= before else None
         if direction:
             reason = 'HYSTERESIS' if not gate[direction] else 'COOLDOWN' if gate['last_ms'] is not None and point['received_ms']-gate['last_ms'] < cfg.cooldown_seconds*1000 else None
@@ -256,18 +269,19 @@ def evolve(previous, sample, cfg):
     excursion = state['excursion']
     if excursion:
         origin, peak = excursion['origin'], excursion['peak']
-        sign = 1 if decimal(peak['ask']) > decimal(origin['ask']) else -1
-        if (value-decimal(peak['ask']))*sign > 0:
+        sign = 1 if number(peak['ask']) > number(origin['ask']) else -1
+        if (value-number(peak['ask']))*sign > 0:
             excursion['peak'] = peak = point
         if point['received_ms']-peak['received_ms'] > cfg.window_seconds*1000 or point['source_ms']-peak['source_ms'] > cfg.window_seconds*1000:
             excursion = None
-        elif point['received_ms'] > peak['received_ms'] and (decimal(peak['ask'])-value)*sign >= abs(decimal(peak['ask'])-decimal(origin['ask']))*decimal(cfg.return_fraction):
+        elif point['received_ms'] > peak['received_ms'] and (number(peak['ask'])-value)*sign >= abs(number(peak['ask'])-number(origin['ask']))*number(cfg.return_fraction):
             events.append({'type':'RETURN','status':'DETECTED','evidence':[origin,peak,point]});excursion=None
     if not excursion:
-        origin = next((p for p in points if abs(value-decimal(p['ask'])) >= decimal(cfg.move)), None)
+        distance = number(cfg.move)
+        origin = next((p for p in points if abs(value-number(p['ask'])) >= distance), None)
         if origin:
             events.append({'type':'MOVE','status':'DETECTED','evidence':[origin,point]});excursion={'origin':origin,'peak':point}
-    if last and decimal(last['ask']) == value:
+    if last and number(last['ask']) == value:
         points[-1] = point
     else:
         points.append(point)
