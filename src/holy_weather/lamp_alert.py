@@ -19,7 +19,7 @@ def remaining(state,market,at):
     return hours,'OK'
 
 
-def record(store,market,state,at,*,key=KEY):
+def record(store,market,state,at,*,key=KEY,verified_markets=()):
     row=store.c.execute('select value from meta where key=?',(key,)).fetchone()
     saved=json.loads(row[0]) if row else dict(previous=None,seen=[],threshold=store.cfg.lamp_peak_change_f,last_at=None)
     if saved['threshold']!=store.cfg.lamp_peak_change_f:raise ValueError('LAMP_ALERT_THRESHOLD_CHANGED')
@@ -67,7 +67,7 @@ def record(store,market,state,at,*,key=KEY):
                 if discovery:refs.add(discovery[0])
                 for ref in refs:store.c.execute('insert into event_inputs values(?,?)',(ident,ref))
                 from .alert_queue import enqueue
-                enqueue(store,ident,event,market,at)
+                enqueue(store,ident,event,market,at,verified_markets=verified_markets)
                 reason=event['reason']
         elif old_status=='OK':reason='INCOMPARABLE_REMAINING_HOURS'
         saved['previous']=state

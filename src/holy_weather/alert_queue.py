@@ -22,26 +22,23 @@ def day_expiry(expires,day,zone):
     return min(expires,int(next_day.timestamp()*1000)-1)
 
 
-def card(event,market,at):
+def card(event,market,at,*,verified_markets=()):
     url=event['market_url'];p=urlparse(url)
     if p.scheme!='https' or p.netloc!='polymarket.com' or len(p.path.strip('/').split('/'))!=3 or p.query or p.fragment:raise ValueError('EXACT_BUCKET_LINK_REQUIRED')
-    city=next(k for k,v in CITIES.items() if v[1]==market['station']).replace('-',' ').title()
-    link='<a href="'+escape(url,quote=True)+'">'+escape(event['bucket'])+'</a>'
-    market_link='<a href="'+escape(url,quote=True)+'">Market ↗</a>'
-    title=escape(city)+' · '+escape(event['bucket'])
     if event['type']=='PRICE_ALERT':
+        city=next(k for k,v in CITIES.items() if v[1]==market['station']).replace('-',' ').title()
+        market_link='<a href="'+escape(url,quote=True)+'">Market ↗</a>'
         a,b=event['previous'],event['current']
         lines=['📈 <b>PRICE ALERT</b>',escape(city)+' · '+event['side']+' · '+escape(event['bucket']),
                'Midpoint: <b>'+num(Decimal(a['midpoint'])*100)+'% → '+num(Decimal(b['midpoint'])*100)+'%</b>',
                'Crossed: '+ ' · '.join(num(Decimal(t)*100)+'%' for t in event['thresholds']),market_link]
         expires=b['source_ms']+90000
     else:
-        f=event['current_forecast']
-        reason='Crossed boundary: '+', '.join(event['crossed_boundaries_f'])+'°F' if event['crossed_boundaries_f'] else 'Peak change: '+num(event['change_f'])+'°F'
-        lines=['☀️ <b>LAMP ALERT</b>',title+' · '+escape(market['station']),
-               'Forecast peak: <b>'+num(event['previous_peak_f'])+'°F → '+num(event['future_peak_f'])+'°F</b>',
-               'NOAA LAMP · '+reason,market_link]
-        expires=f['issue_ms']+7200000
+        from .lamp_card import render
+        if url != market['url']:
+            raise ValueError('EXACT_BUCKET_LINK_REQUIRED')
+        lines=render(event,market,verified_markets)
+        expires=event['current_forecast']['issue_ms']+7200000
     text='\n'.join(lines)
     if len(text)>3500:raise ValueError('CARD_BOUND')
     return text,expires
@@ -109,7 +106,7 @@ def notice_html(store, value, market, at):
     return html
 
 
-def enqueue(store,event_id,event,market,at):
+def enqueue(store,event_id,event,market,at,*,verified_markets=()):
     """Called in the same transaction as its originating event."""
     row=store.c.execute('select payload from events where id=?',(event_id,)).fetchone()
     if not row:raise ValueError('DELIVERY_EVENT_MISSING')
@@ -130,7 +127,7 @@ def enqueue(store,event_id,event,market,at):
     waiting=filtered and Decimal(event['current']['bid'])<=Decimal(event['previous']['bid'])
     key=PREFIX+sha([TARGET,event['type'],event_id])
     if store.c.execute('select 1 from meta where key=?',(key,)).fetchone():return
-    html,expires=card(event,market,at)
+    html,expires=card(event,market,at,verified_markets=verified_markets)
     if event['type']=='PRICE_ALERT':expires=min(event['current']['source_ms'],event['current']['received_ms'])+store.cfg.quote_age_seconds*1000
     # Keep the contract-day limit valid between claim and the final HTTP check.
     expires=day_expiry(expires,market['date'],market['timezone'])

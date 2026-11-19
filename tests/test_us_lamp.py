@@ -82,7 +82,7 @@ def test_ten_stations_all_buckets_independent_restart_atomic_queue(gamma,tmp_pat
         assert s.c.execute("select count(*) from meta where key like 'lamp_alert_v1:%'").fetchone()[0]==20
         queue={k:json.loads(v) for k,v in s.c.execute("select key,value from meta where key like 'alert_delivery_v1:%'")}
         assert len(queue)==20
-        assert all('NOAA LAMP' in v['html'] for v in queue.values())
+        assert all('прогноз NOAA' in v['html'] for v in queue.values())
         key=next(iter(queue));p=preview(s,key);assert claim(s,p,AT+1001)
         finish(s,p,{'status':'SENT','message_id':1},AT+1002)
         key2=next(k for k in queue if k!=key);p2=preview(s,key2);assert claim(s,p2,AT+1003)

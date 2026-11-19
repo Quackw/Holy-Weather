@@ -25,7 +25,7 @@ def test_two_types_restart_and_unknown_no_retry(cfg,market,make_raw):
         seed(s,market,make_raw);kk=keys(s);assert len(kk)==2
         cards=[preview(s,k)for k in kk]
         assert any('PRICE ALERT' in p['html']for p in cards)
-        assert any('LAMP ALERT' in p['html']for p in cards)
+        assert any('☀️ <b>LAMP · Нью-Йорк' in p['html']for p in cards)
         assert claim(s,cards[0],AT+4)
         finish(s,cards[0],{'status':'SENT','message_id':1},AT+5)
         assert claim(s,cards[1],AT+4) # simulate crash after claim
@@ -128,10 +128,12 @@ def test_short_cards_without_clock_or_technical_status(cfg,market,make_raw):
         seed(s,market,make_raw)
         for k in keys(s):
             html=preview(s,k)['html']
-            assert 'Market ↗' in html
+            if 'PRICE ALERT' in html:
+                assert 'Market ↗' in html and len(html.splitlines())==5
+            else:
+                assert 'Открыть рынок 46–47°F ↗' in html and len(html.splitlines())==7
             assert 'UTC' not in html and 'Kyiv' not in html
             assert 'READY' not in html and 'N/A' not in html
-            assert len(html.splitlines())==5
 
 
 @pytest.mark.parametrize('track',['PRICE_ALERT','LAMP_ALERT'])

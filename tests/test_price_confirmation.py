@@ -146,7 +146,7 @@ def test_wait_does_not_block_lamp(cfg,market,make_raw):
         put(s,market,[46]*25,AT+200);put(s,market,[48]*25,AT+300)
         sender=Sender('unused',lambda token,p:(calls.append(p) or {'status':'SENT','message_id':1}))
         sender.tick(s,AT+400);sender.thread.join(timeout=1)
-        assert len(calls)==1 and 'LAMP ALERT' in calls[0]['html']
+        assert len(calls)==1 and '☀️ <b>LAMP · Нью-Йорк' in calls[0]['html']
         assert value(s,k)['status']=='WAITING_BID'
 
 
