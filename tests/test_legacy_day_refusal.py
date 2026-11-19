@@ -253,9 +253,8 @@ with CatalogueStore(cfg,session=False) as s:
  assert not s.c.execute('pragma foreign_key_check').fetchall()
  print(json.dumps(fingerprint(s.c)))
 '''
-    from dataclasses import asdict
-    old_config=asdict(cfg)
-    old_config.pop('us_lamp_enabled')
+    from holy_weather.recovery import Plan
+    old_config=Plan(cfg,None,None,continuous=True).value()['config']
     result = subprocess.run([sys.executable, '-B', '-c', script, str(base), json.dumps(old_config),
                              json.dumps(expected), str(AT)], capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout+result.stderr
