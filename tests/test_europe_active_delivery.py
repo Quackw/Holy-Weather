@@ -6,7 +6,7 @@ import threading
 import time
 
 import pytest
-from websockets.frames import Frame, PING
+from websockets.frames import Frame, PING, TEXT
 from websockets.protocol import CLIENT, OPEN, SERVER, Protocol
 from websockets.sync.connection import Connection
 
@@ -76,8 +76,8 @@ def test_native_pong_with_mature_queue_under_burst(gamma, tmp_path, native_limit
             router = Router(store)
             left, right = socket.socketpair()
             # Fit this finite burst in the socket even on macOS's small AF_UNIX default.
-            right.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 256*1024)
-            left.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 256*1024)
+            right.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 2**20)
+            left.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2**20)
             seen = threading.Event()
             class Peer(Connection):
                 def process_event(self, event):
@@ -90,8 +90,18 @@ def test_native_pong_with_mature_queue_under_burst(gamma, tmp_path, native_limit
             peer = Peer(right, Protocol(SERVER,state=OPEN), ping_interval=None, close_timeout=.1)
             def produce():
                 try:
-                    for frame in frames:
-                        peer.send(frame)
+                    if native_limits:
+                        # Pack distinct WebSocket frames into one bounded socket
+                        # write. Per-send AF_UNIX packet overhead otherwise fills
+                        # Linux's buffer and puts PONG ahead of most of the pulse.
+                        # Serialize with the peer's native control-frame writer.
+                        packet = b''.join(Frame(TEXT,frame.encode()).serialize(mask=False) for frame in frames)
+                        assert len(packet) < right.getsockopt(socket.SOL_SOCKET,socket.SO_SNDBUF)-16384
+                        with peer.protocol_mutex:
+                            right.sendall(packet)
+                    else:
+                        for frame in frames:
+                            peer.send(frame)
                 except Exception:
                     pass  # Expected when the deliberately overloaded baseline closes.
             producer = threading.Thread(target=produce)
