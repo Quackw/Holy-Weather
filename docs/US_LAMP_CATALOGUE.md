@@ -1,5 +1,9 @@
 # US catalogue LAMP
 
+For the optional warming-start/hourly notification policy and weather collection
+during PRICE quota waits, see [US weather continuity](US_WEATHER_CONTINUITY.md).
+The defaults and historical daily-only cards described below remain compatible.
+
 The US catalogue can opt in with `us_lamp_enabled=true` in its existing plan.
 The default is false. Europe rejects this flag. Legacy single-contract
 AWC/LAMP flags and stored KLGA data keep their existing behavior.

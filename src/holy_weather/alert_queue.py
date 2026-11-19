@@ -75,7 +75,9 @@ def card(event,market,at,*,verified_markets=()):
         if 'city_outlook' in event:
             from .weather import WEATHER_AGE_MS
             outlook=event['city_outlook']
-            expires=min(expires,outlook['peak_ms']-1,outlook['observed_ms']+WEATHER_AGE_MS-1)
+            expires=min(expires,outlook['observed_ms']+WEATHER_AGE_MS-1)
+            if event.get('notification_policy')!='US_WARMING_HOURLY_V2' or event['reason']=='WARMING_START':
+                expires=min(expires,outlook['peak_ms']-1)
             if 'delivery_window' in event:
                 expires=min(expires,event['delivery_window']['closes_ms']-1)
     text='\n'.join(lines)
@@ -195,8 +197,8 @@ def enqueue(store,event_id,event,market,at,*,verified_markets=()):
     value=dict(status='PENDING',track=event['type'],event_id=event_id,event_ms=at,html=html,
                expires_ms=expires,target=TARGET,market_date=market['date'],timezone=market['timezone'])
     if (event['type']=='LAMP_ALERT' and 'city_outlook' in event
-            and event.get('delivery_window',{}).get('policy')=='US_CITY_PRE_PEAK_WINDOW_V1'):
-        value['delivery_policy']='US_CITY_PRE_PEAK_WINDOW_V1'
+            and event.get('delivery_window',{}).get('policy') in ('US_CITY_PRE_PEAK_WINDOW_V1','US_WARMING_HOURLY_V2')):
+        value['delivery_policy']=event['delivery_window']['policy']
     if filtered:
         batch_ms=store.cfg.price_batch_seconds*1000
         value.update(event_ids=[event_id],side=event['side'],token=event['token'],batch_market=market['url'],batch_until_ms=at+batch_ms,

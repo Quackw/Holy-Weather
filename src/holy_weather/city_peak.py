@@ -17,7 +17,7 @@ LOCAL_SEND_END = 20
 MAX_PEAK_LEAD_MS = 3 * HOUR
 
 
-def outlook(weather, forecast, market, at):
+def outlook(weather, forecast, market, at, *, require_warming=True):
     hours, status = lamp_alert.remaining(forecast, market, at)
     if status != 'OK':
         return None, status
@@ -62,7 +62,7 @@ def outlook(weather, forecast, market, at):
         qualifying.append(Decimal(c_to_f(c)))
     observed = max(qualifying)
     peak = max(map(Decimal, hours.values()))
-    if peak <= now:
+    if require_warming and peak <= now:
         return None, 'NO_FUTURE_WARMING'
     when = min(h for h, temp in hours.items() if Decimal(temp) == peak)
     return dict(current_f=str(now), observed_max_f=str(observed), future_peak_f=str(peak),
@@ -94,6 +94,9 @@ def send_window(market, view, at):
 
 
 def record(store, markets, forecast, at):
+    if getattr(store.cfg,'us_lamp_notice_mode','pre_peak')=='warming_hourly':
+        from .lamp_hourly import record as hourly_record
+        return hourly_record(store,markets,forecast,at)
     if not markets or forecast.get('status') != 'OK':
         return
     market = markets[0]

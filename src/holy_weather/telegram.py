@@ -71,7 +71,7 @@ class Sender:
             local_city_expiry=(not p['test'] and r.get('status')=='REJECTED'
                 and r.get('reason')=='QUOTE_EXPIRED_BEFORE_HTTP'
                 and receipt.get('track')=='LAMP_ALERT'
-                and receipt.get('delivery_policy')=='US_CITY_PRE_PEAK_WINDOW_V1')
+                and receipt.get('delivery_policy') in ('US_CITY_PRE_PEAK_WINDOW_V1','US_WARMING_HOURLY_V2'))
             if r['status']!='SENT' and not local_city_expiry:
                 self.stopped=True
                 self.disabled_reason='SEND_RESULT_UNKNOWN' if r['status']=='UNKNOWN' else 'SEND_RESULT_NOT_SENT'
