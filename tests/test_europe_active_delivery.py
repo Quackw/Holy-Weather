@@ -70,7 +70,7 @@ def test_native_pong_with_mature_queue_under_burst(gamma, tmp_path, native_limit
             # Fixed cost per SQLite VM instruction block, independent of query/version.
             # Scaled test clocks keep the native 1011 reproduction finite in CI.
             def sql_cost():
-                time.sleep(.002 if native_limits else .001)
+                time.sleep(.004 if native_limits else .001)
                 return 0
             store.c.set_progress_handler(sql_cost, 300 if native_limits else 500)
             router = Router(store)
@@ -90,33 +90,24 @@ def test_native_pong_with_mature_queue_under_burst(gamma, tmp_path, native_limit
             peer = Peer(right, Protocol(SERVER,state=OPEN), ping_interval=None, close_timeout=.1)
             def produce():
                 try:
-                    if native_limits:
-                        # Pack distinct WebSocket frames into one bounded socket
-                        # write. Per-send AF_UNIX packet overhead otherwise fills
-                        # Linux's buffer and puts PONG ahead of most of the pulse.
-                        # Serialize with the peer's native control-frame writer.
-                        packet = b''.join(Frame(TEXT,frame.encode()).serialize(mask=False) for frame in frames)
-                        assert len(packet) < right.getsockopt(socket.SOL_SOCKET,socket.SO_SNDBUF)-16384
-                        with peer.protocol_mutex:
-                            right.sendall(packet)
-                    else:
-                        for frame in frames:
-                            peer.send(frame)
+                    # One bounded socket write, still distinct WebSocket frames.
+                    # Per-send AF_UNIX packet overhead otherwise changes where
+                    # PONG enters the pulse on Linux. Serialize with its writer.
+                    packet = b''.join(Frame(TEXT,frame.encode()).serialize(mask=False) for frame in frames)
+                    assert len(packet) < right.getsockopt(socket.SOL_SOCKET,socket.SO_SNDBUF)-16384
+                    with peer.protocol_mutex:
+                        right.sendall(packet)
                 except Exception:
                     pass  # Expected when the deliberately overloaded baseline closes.
             producer = threading.Thread(target=produce)
             try:
-                if native_limits:
-                    # Prove the whole pulse is queued before native keepalive,
-                    # without depending on a scheduler's 100ms timing margin.
-                    producer.start()
-                    producer.join(2)
-                    assert not producer.is_alive()
-                    client.start_keepalive()
-                    assert seen.wait(12)  # Native 10s PING; peer has sent PONG.
-                else:
-                    client.start_keepalive()
-                    producer.start()
+                # Prove both the full pulse and the responding peer before
+                # consuming. This avoids a scheduler-dependent PONG position.
+                producer.start()
+                producer.join(2)
+                assert not producer.is_alive()
+                client.start_keepalive()
+                assert seen.wait(12 if native_limits else 2)
                 for i, frame in enumerate(frames):
                     if client.protocol.close_sent:
                         break
