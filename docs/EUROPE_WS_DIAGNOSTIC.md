@@ -72,7 +72,8 @@ civil anchors do not manufacture historical source/receipt timestamps.
 | PENDING_PING | Sequence, queued ns, flushed ns, parsed ns, outstanding age ns |
 | PHASE_CURRENT | Main-loop phase, entry ns, elapsed ns |
 | PHASE_INTERVAL | Phase, completed calls, total ns, **interval maximum ns**, interval start ns, interval end ns |
-| RECEIVER_INTERVAL / MAIN_INTERVAL | Interval frames/messages, interval payload bytes, **connection-cumulative** maximum payload size, interval start ns, interval end ns |
+| RECEIVER_INTERVAL | Interval data frames, interval payload bytes, **connection-cumulative** maximum payload size, interval start ns, interval end ns |
+| MAIN_INTERVAL | Interval messages, interval payload bytes, **capture-cumulative** maximum payload size, interval start ns, interval end ns |
 | CLIENT_FAIL | Native close code, 1 only for the library's keepalive-timeout reason |
 | REMOTE_CLOSE | Received native close code only |
 
