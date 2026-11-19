@@ -4,6 +4,7 @@ Only the planned units call this. Existing finite runners keep stdin credentials
 No token environment/argument fallback; malformed state fails closed with exit 78.
 """
 from pathlib import Path
+from datetime import datetime,timezone
 import json,os,re,resource,signal,socket,stat,subprocess,threading,time
 from .core import canonical
 from .recovery import Plan,RecoveryStop,private,supervise,write
@@ -45,6 +46,12 @@ class Health:
             'OFF' if reason in ('NOT_ENABLED_IN_PLAN','NOT_ENABLED_IN_CONFIG') else 'DISABLED')
         status=dict(controller=safe(value.get('status')),telegram=sender,
                     reason=safe(reason) if reason is not None else None,watchdog='ARMED' if self.armed else 'OFF')
+        if value.get('collection_paused') is True:
+            at=value.get('next_attempt_ms');quota=value.get('quota_available_ms')
+            valid=lambda t:type(t) is int and 0<=t<253402300800000
+            status.update(collection_paused=True,recovery_reason=safe(value.get('recovery_reason')),
+                          next_attempt_ms=at if valid(at) else None,
+                          quota_available_ms=quota if valid(quota) else None)
         changed=status!=self.previous
         if changed:
             print(canonical(dict(event='PRICE_SERVICE_HEALTH',**status)),flush=True)
@@ -55,6 +62,11 @@ class Health:
         self.next_ping=now+self.interval
         message='WATCHDOG=1\nSTATUS=PRICE controller='+status['controller']+'; Telegram='+sender
         if status['reason']:message+='; reason='+status['reason']
+        if status.get('collection_paused'):
+            at=status['next_attempt_ms']
+            message+='; collection=PAUSED; retry_at='+(
+                datetime.fromtimestamp(at/1000,timezone.utc).isoformat(timespec='seconds') if at is not None else 'UNKNOWN')
+            message+='; recovery_reason='+status['recovery_reason']
         try:self.notify(message)
         except OSError:
             if not self.notify_failed:print(canonical(dict(event='PRICE_SERVICE_NOTIFY_UNAVAILABLE')),flush=True)

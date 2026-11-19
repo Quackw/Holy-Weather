@@ -17,6 +17,8 @@ STOP_REQUEST='service-stop.json'
 AUDIT='price_control_audit_v1:'
 SAFE_STOP_STATES={'SIGNAL_STOP','COMPLETED_WINDOW','CANCELLED_BEFORE_SPAWN',
                   'NO_VERIFIED_CURRENT_MARKETS','ALL_MARKETS_CLOSED_OR_LOCAL_DATE_ENDED'}
+QUOTA_WAIT='WAITING_NETWORK_QUOTA'
+NETWORK_RETRY={'RECONNECT_BUDGET_EXHAUSTED','NETWORK_GAP_NO_RETRY'}
 
 
 def clean_stop(state):
@@ -81,6 +83,49 @@ def charge(state,now):
     return True
 
 
+def quota_available(restarts,now):
+    """Earliest admission under BOTH unchanged rolling limits; never prune debt."""
+    if any(type(t) is not int or not 0<=t<=now for t in restarts):
+        raise LifecycleStop('RECOVERY_BUDGET_CLOCK_OR_RECORD')
+    due=now
+    for window,limit in ((3600000,3),(86400000,6)):
+        recent=sorted(t for t in restarts if now-t<window)
+        if len(recent)>=limit:due=max(due,recent[len(recent)-limit]+window)
+    return due
+
+
+def network_retry(state,now):
+    """Only a known, closed, successful protocol result admits quota waiting."""
+    last=state['attempts'][-1] if state['attempts'] else None
+    known=bool(not state.get('active') and last and last.get('state') in NETWORK_RETRY
+        and type(last.get('returncode')) is int and last['returncode']==0
+        and last.get('error') is None and last.get('reason') is None
+        and last.get('guard_protocol')==PROTOCOL
+        and type(last.get('finished_ms')) is int and last['at_ms']<=last['finished_ms']<=now)
+    marker=state.get('network_quota_wait')
+    if marker and (not known or marker.get('source_nonce')!=last['nonce'] or marker.get('reason')!=last['state']
+            or any(type(marker.get(k)) is not int for k in ('since_ms','quota_available_ms','resume_not_before_ms'))
+            or not last['finished_ms']<=marker['since_ms']<=now
+            or not marker['since_ms']<=marker['quota_available_ms']<=marker['resume_not_before_ms']):
+        raise LifecycleStop('RECOVERY_NETWORK_WAIT_DRIFT')
+    return known
+
+
+def defer_network(state,now):
+    """Persist an unpaid wait, not a reusable recovery credit."""
+    if not network_retry(state,now) or state.get('recovery_charged'):
+        raise LifecycleStop('RECOVERY_NETWORK_WAIT_SOURCE')
+    last=state['attempts'][-1];previous=state.get('network_quota_wait')
+    if previous and (previous['source_nonce']!=last['nonce'] or previous['reason']!=last['state']):
+        raise LifecycleStop('RECOVERY_NETWORK_WAIT_DRIFT')
+    due=quota_available(state['restarts'],now)
+    recent=sum(due-t<86400000 for t in state['restarts'])
+    value=dict(source_nonce=last['nonce'],reason=last['state'],
+               since_ms=previous['since_ms'] if previous else now,quota_available_ms=due,
+               resume_not_before_ms=due+min(30*2**recent,300)*1000)
+    state.update(retry=True,status=QUOTA_WAIT,network_quota_wait=value)
+
+
 def stop_request(root,state):
     path=root/STOP_REQUEST
     if not path.exists():return None
@@ -92,7 +137,7 @@ def stop_request(root,state):
     return value
 
 
-def reconcile(root,state,now,write,preflight):
+def reconcile(root,state,now,write,preflight,*,wait_network_quota=False):
     """Caller owns inherited-controller lock; no adoption of an ambiguous old run."""
     current=own_identity();previous=state.get('controller_process');request=stop_request(root,state)
     reason=request['reason'] if request else state.get('stop_reason')
@@ -102,12 +147,18 @@ def reconcile(root,state,now,write,preflight):
             'FATAL','UNKNOWN_EXIT','UNRESPONSIVE_NO_KILL','RESTART_BUDGET_EXHAUSTED','ATTEMPT_LIMIT','DEADLINE','NETWORK_REFUSED_NO_RETRY'):
         return False
     if state['status']=='STOPPED' and not shutdown:return False
+    waiting=state['status']==QUOTA_WAIT
+    if waiting and not (wait_network_quota and state.get('retry') is True
+                        and state.get('network_quota_wait') and network_retry(state,now)):
+        return False
     allowed={'PREPARING','COMPLETED_WINDOW','BACKOFF','STARTING','RUNNING','STOP','STALLED',
              'NO_VERIFIED_CURRENT_MARKETS','ALL_MARKETS_CLOSED_OR_LOCAL_DATE_ENDED','STOPPED'}
     if state['status'] not in allowed and not state.get('retry'):return False
     if reason=='HOST_SHUTDOWN' and previous and previous['boot']==current['boot']:return False
     if previous and previous!=current and alive(previous):raise LifecycleStop('LIFECYCLE_OLD_CONTROLLER_ALIVE')
     if now<state['last_ms']:raise LifecycleStop('RECOVERY_CLOCK_REVERSED')
+    network=wait_network_quota and state.get('retry') is True and network_retry(state,now)
+    if network and preflight()!=state['identity']:raise LifecycleStop('RECOVERY_CONTROL_BINDING')
     interrupted=previous is not None and previous!=current
     if state.get('active'):
         entry=state['attempts'][-1];nonce=state['active']
@@ -134,9 +185,13 @@ def reconcile(root,state,now,write,preflight):
         state.update(active=None,retry=True)
         interrupted=True
     if interrupted and not state.get('recovery_charged'):
-        charge(state,now)
+        if network and quota_available(state['restarts'],now)>now:
+            defer_network(state,now)
+        else:charge(state,now)
         if not state['retry']:write(root,'state.json',state);return False
-    state.update(controller_process=current,stop_reason=None,status='BACKOFF' if state.get('retry') else 'PREPARING')
+    state.update(controller_process=current,stop_reason=None,
+                 status=QUOTA_WAIT if state.get('status')==QUOTA_WAIT and not state.get('recovery_charged')
+                 else 'BACKOFF' if state.get('retry') else 'PREPARING')
     # Consuming a service-stop intent needs audit/retirement before another start.
     if request:state.update(consume_stop_request=True,stop_request_controller=request['controller'])
     write(root,'state.json',state)

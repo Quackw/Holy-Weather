@@ -351,6 +351,7 @@ def supervise(plan,control_dir,*,token=None,stop=None,clock=None,monotonic=time.
     if plan.config.telegram_enabled and (not isinstance(token,str) or not re.fullmatch(r'\d+:[A-Za-z0-9_-]{20,}',token)):raise RecoveryStop('RECOVERY_EXPLICIT_TOKEN')
     default_wait=wait is None
     stop=stop or threading.Event();clock=clock or (lambda:time.time_ns()//1000000);wait=wait or stop.wait
+    wait_network_quota=plan.continuous and plan.config.region=='us'
     with owned_control(control_dir,plan.config.data_dir,with_fd=True) as (root,guard_fd):
         if (root/'transition.json').exists():raise RecoveryStop('RECOVERY_UNFINISHED_TRANSITION')
         if plan.archive_dir:
@@ -366,7 +367,8 @@ def supervise(plan,control_dir,*,token=None,stop=None,clock=None,monotonic=time.
         if state is not None:
             if plan.continuous:
                 state=lifecycle.finish_rotation(root,plan,state,write)
-                if not lifecycle.reconcile(root,state,clock(),write,lambda:preflight(plan)):
+                if not lifecycle.reconcile(root,state,clock(),write,lambda:preflight(plan),
+                                           wait_network_quota=wait_network_quota):
                     write(root,'state.json',state);return state
             elif state.get('active'):
                 # The previous controller may have died during launch/write.
@@ -382,7 +384,14 @@ def supervise(plan,control_dir,*,token=None,stop=None,clock=None,monotonic=time.
         retry=bool(state.get('retry'));child=None
         carry_pending_price=False
         def health():
-            if on_health:on_health({k:state[k] for k in ('status','telegram_enabled','telegram_disabled_reason') if k in state})
+            if on_health:
+                value={k:state[k] for k in ('status','telegram_enabled','telegram_disabled_reason') if k in state}
+                waiting=state.get('network_quota_wait')
+                if waiting and state['status'] in (lifecycle.QUOTA_WAIT,'BACKOFF'):
+                    value.update(collection_paused=True,recovery_reason=waiting['reason'],
+                        quota_available_ms=waiting['quota_available_ms'],
+                        next_attempt_ms=state.get('next_ms',waiting['resume_not_before_ms']))
+                on_health(value)
         def save(status):
             state.update(status=status,last_ms=clock());write(root,'state.json',state);health()
         def ended():return stop.is_set() or plan.deadline_ms is not None and clock()>=plan.deadline_ms or monotonic()>=mono_deadline
@@ -402,6 +411,17 @@ def supervise(plan,control_dir,*,token=None,stop=None,clock=None,monotonic=time.
                 if retry:
                     recent=[t for t in state['restarts'] if now-t<86400000]
                     if plan.continuous:
+                        if (wait_network_quota and not state.get('recovery_charged')
+                                and lifecycle.network_retry(state,now)):
+                            if code_identity()!=code:raise RecoveryStop('RECOVERY_CODE_DRIFT')
+                            if preflight(plan)!=identity:raise RecoveryStop('RECOVERY_CONTROL_BINDING')
+                            due=lifecycle.quota_available(state['restarts'],now)
+                            if due>now:
+                                lifecycle.defer_network(state,now);save(lifecycle.QUOTA_WAIT)
+                                while clock()<due and not ended():
+                                    if clock()<state['last_ms']:raise RecoveryStop('RECOVERY_CLOCK_REVERSED')
+                                    health();wait(min(1,(due-clock())/1000))
+                                continue  # Recheck both windows before the one durable charge.
                         if not state.get('recovery_charged') and not lifecycle.charge(state,now):save(state['status']);break
                     elif len(recent)>=6 or sum(now-t<3600000 for t in recent)>=3:state['retry']=False;save('RESTART_BUDGET_EXHAUSTED');break
                     next_ms=state.get('next_ms',now+min(BACKOFF_SECONDS*2**len(recent),300)*1000)
@@ -424,7 +444,7 @@ def supervise(plan,control_dir,*,token=None,stop=None,clock=None,monotonic=time.
                 state['attempts'].append(entry);state['active']=nonce;state.pop('next_ms',None)
                 # The paid recovery belongs to this durable launch intent. Keep
                 # it through BACKOFF, but never let an interrupted spawn reuse it.
-                state.pop('recovery_charged',None);save('STARTING')
+                state.pop('recovery_charged',None);state.pop('network_quota_wait',None);save('STARTING')
                 if ended():
                     entry.update(state='CANCELLED_BEFORE_SPAWN',finished_ms=clock());state.update(active=None,retry=False)
                     if retry and not plan.continuous:state['restarts'].pop()
