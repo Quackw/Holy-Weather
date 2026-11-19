@@ -128,6 +128,9 @@ class CatalogueStore(Store):
         self.markets = {}; self.tokens = {}
         super().__init__(cfg, **kwargs)
         try:
+            if cfg.us_lamp_enabled:
+                from .alert_queue import index_active_deliveries
+                index_active_deliveries(self)
             # Load only the latest retained date per station; older identities/evidence
             # remain in SQLite, not in the bounded subscription registry.
             for row in self.c.execute("""select m.value from meta m where m.key like ?
@@ -272,7 +275,7 @@ class CatalogueStore(Store):
         return value
 
     def expire_closed_deliveries(self, at, selected=None):
-        rows=self.c.execute("select key,value from meta where key like 'alert_delivery_v1:%' and json_extract(value,'$.status') in ('PENDING','WAITING_BID')").fetchall()
+        rows=self.c.execute(f"select key,value from {self.active_delivery_source} where key like 'alert_delivery_v1:%' and json_extract(value,'$.status') in ('PENDING','WAITING_BID')").fetchall()
         expired=[]
         for row in rows:
             value=json.loads(row['value'])
@@ -448,7 +451,7 @@ class DayDiscovery:
 
 def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=None, token=None, metar_fetch=None,
                       clock=None, monotonic=time.monotonic, stop=None, wait=None, progress=None, session_day=None,
-                      on_sender_status=None,rotate_bytes=None,lamp_fetch=None):
+                      on_sender_status=None,rotate_bytes=None,lamp_fetch=None,price_recovery=False):
     """Finite session with local-day revalidation; no service or extended deadline."""
     import threading
     from websockets.exceptions import WebSocketException
@@ -458,13 +461,14 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
     if connect is None:
         from websockets.sync.client import connect
     clock=clock or millis;stop=stop or threading.Event();wait=wait or stop.wait
+    if type(price_recovery) is not bool:raise ValueError('CATALOGUE_PRICE_RECOVERY_FLAG')
     if rotate_bytes is not None and (type(rotate_bytes) is not int or not 8*1024**2<=rotate_bytes<=cfg.storage_bytes-32*1024**2):
         raise ValueError('CATALOGUE_ROTATION_BOUND')
     if cfg.telegram_enabled and not token:raise ValueError('EXPLICIT_TELEGRAM_TOKEN_REQUIRED')
     sender=Sender(token,**({'transport':transport} if transport else {}),minimum_interval_ms=3100) if cfg.telegram_enabled else None
     lamp=None
     if cfg.us_lamp_enabled:
-        from .us_lamp import Collection,fetch_cycle
+        from .us_lamp import Collection,fetch_cycle,HANDOFF_SECONDS
         lamp=Collection(lamp_fetch or fetch_cycle)
     metar = None
     if cfg.catalogue_metar_enabled:
@@ -615,6 +619,7 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
                 except (OSError,TimeoutError,WebSocketException) as exc:
                     telemetry.update(native_timing(ws))
                     store.gap('CATALOGUE_NETWORK_GAP',clock())
+                    if hasattr(progress,'observation'):progress.observation(store.runtime_status(clock()))
                     result.update(error=type(exc).__name__,detail=str(exc)[:240])
                     # Denied access / protocol and oversized-frame errors are not
                     # transient outages. Never bypass them through reconnects.
@@ -642,16 +647,27 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
                     if result.get('rotation_reason'):break
                     if days.due() or not any(store.active(c,clock()) for c in selected):continue
                     break
-            # Source collection and its sender continue during a known market
-            # outage until this bounded worker ends. PRICE stays disconnected.
+            # A finite experiment may continue forecast-only collection. A
+            # continuous supervisor must regain PRICE without waiting out the
+            # whole window: finish existing bounded HTTP work, then return the
+            # original failure for the unchanged recovery budget/backoff.
             if lamp and result['state'] in ('NETWORK_GAP_NO_RETRY','RECONNECT_BUDGET_EXHAUSTED','NETWORK_REFUSED_NO_RETRY'):
-                while not stopped():
+                handoff=price_recovery and result['state'] in ('NETWORK_GAP_NO_RETRY','RECONNECT_BUDGET_EXHAUSTED')
+                until=min(deadline,monotonic()+HANDOFF_SECONDS) if handoff else deadline
+                while not stopped() and monotonic()<until:
+                    if handoff and not lamp.pending():break
                     progress('OBSERVING')
-                    lamp.tick(store,selected,clock())
+                    lamp.tick(store,selected,clock(),allow_request=not handoff)
+                    if monotonic()>=next_observation:
+                        if hasattr(progress,'observation'):progress.observation(store.runtime_status(clock()))
+                        next_observation=monotonic()+10
                     store.expire_closed_deliveries(clock())
                     if metar:tick_metar()
                     if sender:sender.tick(store,clock());sender_status()
-                    if wait(min(.25,max(0,deadline-monotonic()))):break
+                    if wait(min(.25,max(0,until-monotonic()))):break
+                if handoff:
+                    lamp.tick(store,selected,clock(),allow_request=False)
+                    lamp.close(store,clock())
             progress('STOPPING')
             store.gap('CATALOGUE_SESSION_ENDED',clock())
             if hasattr(progress,'observation'):progress.observation(store.runtime_status(clock()))
