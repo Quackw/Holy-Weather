@@ -16,6 +16,9 @@ from .weather import millis
 
 KEY='us_lamp_poll_v1'
 MAX_DOWNLOAD=6*1024*1024
+HTTP_TIMEOUT_SECONDS=5
+SCAN_SECONDS=10
+HANDOFF_SECONDS=HTTP_TIMEOUT_SECONDS+SCAN_SECONDS+1
 PUBLICATION_WAIT_MS=10*60*1000
 RETRY_MS=5*60*1000
 HEADER=re.compile(rb'\s*([A-Z0-9]{4})\s+GFS LAMP GUIDANCE\s+\d{1,2}/\d{1,2}/\d{4}\s+\d{4} UTC\s*')
@@ -34,14 +37,14 @@ def fetch_cycle(issue_ms,*,fetch=urlopen,clock=millis):
     stations={v[1] for v in US_CITIES.values()}
     blocks={};current=None;size=0;digest=hashlib.sha256();started=time.monotonic()
     try:
-        with fetch(Request(source,headers={'User-Agent':'Holy-Weather/US-LAMP bounded-observation'}),timeout=5) as response:
+        with fetch(Request(source,headers={'User-Agent':'Holy-Weather/US-LAMP bounded-observation'}),timeout=HTTP_TIMEOUT_SECONDS) as response:
             if response.status!=200:raise ValueError('LAMP_HTTP_STATUS')
             if hasattr(response,'geturl') and response.geturl()!=source:raise ValueError('LAMP_SOURCE_REDIRECT')
             modified=response.headers.get('Last-Modified')
             length=response.headers.get('Content-Length')
             if length is not None and not 0<int(length)<=MAX_DOWNLOAD:raise ValueError('LAMP_DOWNLOAD_BOUND')
             while line:=response.readline(1025):
-                if time.monotonic()-started>10:raise TimeoutError('LAMP_TOTAL_TIMEOUT')
+                if time.monotonic()-started>SCAN_SECONDS:raise TimeoutError('LAMP_TOTAL_TIMEOUT')
                 size+=len(line);digest.update(line)
                 if size>MAX_DOWNLOAD or len(line)>1024:raise ValueError('LAMP_DOWNLOAD_BOUND')
                 header=HEADER.fullmatch(line)
@@ -81,18 +84,25 @@ class Collection:
     def __init__(self,fetcher=fetch_cycle):
         self.fetcher=fetcher;self.results=queue.Queue(maxsize=1);self.thread=None;self.state=None;self.closed=False
 
-    def tick(self,store,selected,at):
+    def pending(self):
+        return bool(self.thread and self.thread.is_alive()) or not self.results.empty()
+
+    def tick(self,store,selected,at,*,allow_request=True):
         if self.closed:return
         if self.state is None:
             row=store.c.execute('select value from meta where key=?',(KEY,)).fetchone()
             self.state=json.loads(row[0]) if row else dict(next_ms=0,attempts=0,blocked=False)
-        markets=[m for c,m in store.markets.items() if c in selected and store.active(c,at)]
         independent=store.cfg.us_weather_continuity_enabled
         try:result=self.results.get_nowait()
         except queue.Empty:result=None
+        if result is None and (not allow_request or self.state['blocked'] or at<self.state['next_ms']
+                               or self.thread is not None and self.thread.is_alive()):return
+        if result is not None and any(r['received_ms']>at for r in result['receipts'].values()):
+            self.results.put_nowait(result);return
+        # An idle five-minute/hourly schedule doesn't need 110 market checks
+        # on every delivery tick. Revalidate only before using a result/request.
+        markets=[m for c,m in store.markets.items() if c in selected and store.active(c,at)]
         if result is not None:
-            if any(r['received_ms']>at for r in result['receipts'].values()):
-                self.results.put_nowait(result);return
             statuses={}
             for station,receipt in result['receipts'].items():
                 contracts=[m for m in markets if m['station']==station]
@@ -113,7 +123,7 @@ class Collection:
                 self.state['last_success_ms']=self.state['cycle_ms']
                 self.state['next_ms']=self.state['cycle_ms']+3600000+PUBLICATION_WAIT_MS
             store.set_meta(KEY,self.state)
-        if self.state['blocked'] or at<self.state['next_ms'] or not (markets or independent):return
+        if not allow_request or self.state['blocked'] or at<self.state['next_ms'] or not (markets or independent):return
         if self.thread is not None and self.thread.is_alive():return
         cycle=cycle_at(at)
         attempts=self.state['attempts'] if self.state.get('cycle_ms')==cycle else 0
@@ -128,5 +138,9 @@ class Collection:
         self.thread=threading.Thread(target=request,daemon=True,name='us-lamp-one-request')
         self.thread.start()
 
-    def close(self):
+    def close(self,store=None,at=None):
+        if self.closed:return
+        if store is not None and self.pending():
+            self.state.update(status='INTERRUPTED',reason='PRICE_RECOVERY_HANDOFF',interrupted_ms=at)
+            store.set_meta(KEY,self.state)  # Keep paid attempts and the original retry schedule.
         self.closed=True

@@ -375,8 +375,10 @@ class Store:
             if awaiting and previous:
                 previous=reset(previous)
             europe = getattr(self.cfg,'region',None)=='europe'
-            state, events, status = evolve(previous, sample, self.cfg, owned=europe and not awaiting,
-                                          decimal_parser=cached_price if europe else None, _extrema=hint)
+            us = getattr(self.cfg,'region',None)=='us'
+            us_lamp = us and getattr(self.cfg,'us_lamp_enabled',False)
+            state, events, status = evolve(previous, sample, self.cfg, owned=(europe or us_lamp) and not awaiting,
+                                          decimal_parser=cached_price if (europe or us) else None, _extrema=hint)
             if status=='ENGINE_POINT_BOUND' and self.cfg.price_alert_enabled:
                 # The accepted source clock must survive the research reset/GAP.
                 state['high_source']=sample['source_ms']

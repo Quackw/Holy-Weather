@@ -141,7 +141,7 @@ class CatalogueConfig(Config):
 
 class CatalogueStore(Store):
     def usage(self):
-        if self.cfg.region!='europe':return super().usage()
+        if self.cfg.region not in ('europe','us'):return super().usage()
         # Keep the exact per-transaction limit and reject every unexpected entry.
         # DirEntry.stat(lstat) validates type and measures size in one syscall.
         total=count=0
@@ -160,7 +160,7 @@ class CatalogueStore(Store):
         self.markets = {}; self.tokens = {}
         super().__init__(cfg, **kwargs)
         try:
-            if cfg.region == 'europe':
+            if cfg.region == 'europe' or cfg.us_lamp_enabled:
                 from .alert_queue import index_active_deliveries
                 index_active_deliveries(self)
             # Load only the latest retained date per station; older identities/evidence
@@ -487,9 +487,48 @@ class DayDiscovery:
         s.expire_closed_deliveries(self.clock(),self.selected)
 
 
+class USPriceRecovery:
+    """Request an authoritative book when fresh depth cannot advance PRICE.
+
+    No REST, extra connection or depth promotion. Only a normal confirmed book
+    or BBO can finish recovery. Unanswered requests are bounded per token.
+    """
+    def __init__(self, started):
+        self.started=started;self.next_scan=started;self.requested={};self.failures={}
+
+    def tick(self, store, ws, live_tokens, at, mono):
+        if mono<self.next_scan:return 0
+        self.next_scan=mono+1
+        prices={key[len('price_alert_v1:'):]:json.loads(raw).get('previous') for key,raw in
+                store.c.execute("select key,value from meta where key like 'price_alert_v1:%'")}
+        selected=[]
+        for token in sorted(live_tokens):
+            previous=prices.get(token)
+            if (token in store.price_alert_ready and previous
+                    and quote_clock_status(store.cfg,previous['source_ms'],previous['received_ms'],at)=='FRESH'):
+                self.failures.pop(token,None);continue
+            top=store.seen_tops.get(token)
+            if (mono-self.started<5 or not top or any(x is None for x in top['top'])
+                    or quote_clock_status(store.cfg,top['source_ms'],top['received_ms'],at)!='FRESH'
+                    or self.failures.get(token,0)>=3 or mono-self.requested.get(token,-1e30)<20
+                    or not store.active(store.tokens[token],at)):
+                continue
+            selected.append(token)
+            if len(selected)==16:break
+        for token in selected:
+            # Keep fired levels/high-water and refuse confirmation across this
+            # explicit gap. The first returned book/BBO is a baseline.
+            store.invalidate('PRICE_BASELINE_RECOVERY',at,token)
+            self.requested[token]=mono;self.failures[token]=self.failures.get(token,0)+1
+        if selected:
+            ws.send(canonical(dict(operation='unsubscribe',assets_ids=selected)))
+            ws.send(canonical(dict(operation='subscribe',assets_ids=selected,custom_feature_enabled=True)))
+        return len(selected)
+
+
 def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=None, token=None, metar_fetch=None,
                       clock=None, monotonic=time.monotonic, stop=None, wait=None, progress=None, session_day=None,
-                      on_sender_status=None,rotate_bytes=None,lamp_fetch=None,weather_only=False):
+                      on_sender_status=None,rotate_bytes=None,lamp_fetch=None,price_recovery=False,weather_only=False):
     """Finite session with local-day revalidation; no service or extended deadline."""
     import threading
     from websockets.exceptions import WebSocketException
@@ -499,6 +538,7 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
     if connect is None:
         from websockets.sync.client import connect
     clock=clock or millis;stop=stop or threading.Event();wait=wait or stop.wait
+    if type(price_recovery) is not bool:raise ValueError('CATALOGUE_PRICE_RECOVERY_FLAG')
     if weather_only and not cfg.us_weather_continuity_enabled:
         raise ValueError('WEATHER_ONLY_REQUIRES_US_CONTINUITY')
     if rotate_bytes is not None and (type(rotate_bytes) is not int or not 8*1024**2<=rotate_bytes<=cfg.storage_bytes-32*1024**2):
@@ -507,7 +547,7 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
     sender=Sender(token,**({'transport':transport} if transport else {}),minimum_interval_ms=3100) if cfg.telegram_enabled else None
     lamp=None
     if cfg.us_lamp_enabled:
-        from .us_lamp import Collection,fetch_cycle
+        from .us_lamp import Collection,fetch_cycle,HANDOFF_SECONDS
         lamp=Collection(lamp_fetch or fetch_cycle)
     metar = None
     if cfg.catalogue_metar_enabled:
@@ -527,10 +567,10 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
                     record(store, markets, store.lamp_state(markets[0]), at)
 
     selected=set();next_weather_review=0
-    def weather_tick():
+    def weather_tick(*,allow_request=True):
         nonlocal next_weather_review
         if metar:tick_metar()
-        if lamp:lamp.tick(store,selected,clock())
+        if lamp:lamp.tick(store,selected,clock(),allow_request=allow_request)
         if cfg.us_lamp_notice_mode=='warming_hourly' and monotonic()>=next_weather_review:
             from .lamp_hourly import review
             review(store,selected,clock())
@@ -617,6 +657,7 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
                         store.transport_record({'kind':'CONNECTED','at_ms':clock(),'attempt':reconnects+1},telemetry)
                         ws.send(canonical({'type':'market','assets_ids':tokens[:16],'custom_feature_enabled':True}))
                         subscribed=min(16,len(tokens));live_tokens=set(tokens[:16]);next_subscription=monotonic()+1
+                        baseline_recovery=USPriceRecovery(monotonic()) if cfg.region=='us' else None
                         telemetry['subscribed_tokens']=len(live_tokens)
                         last_ping=monotonic();last_pong=last_ping;next_stats=last_ping
                         next_maintenance=next_delivery=last_ping
@@ -642,6 +683,9 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
                                 for start in range(0,len(closed),16):
                                     ws.send(canonical({'operation':'unsubscribe','assets_ids':closed[start:start+16]}))
                                 live_tokens.difference_update(closed)
+                                if baseline_recovery:
+                                    requests=baseline_recovery.tick(store,ws,live_tokens,at,monotonic())
+                                    telemetry['price_baseline_resubscriptions']=telemetry.get('price_baseline_resubscriptions',0)+requests
                                 telemetry['subscribed_tokens']=len(live_tokens)
                                 telemetry['maintenance_ms_max']=max(telemetry['maintenance_ms_max'],round((monotonic()-maintenance_start)*1000,3))
                                 next_maintenance=monotonic()+.25
@@ -714,6 +758,7 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
                 except (OSError,TimeoutError,WebSocketException) as exc:
                     telemetry.update(native_timing(ws))
                     store.gap('CATALOGUE_NETWORK_GAP',clock())
+                    if cfg.us_lamp_enabled and hasattr(progress,'observation'):progress.observation(store.runtime_status(clock()))
                     result.update(error=type(exc).__name__,detail=str(exc)[:240])
                     # Denied access / protocol and oversized-frame errors are not
                     # transient outages. Never bypass them through reconnects.
@@ -748,19 +793,27 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
                     if result.get('rotation_reason'):break
                     if days.due() or not any(store.active(c,clock()) for c in selected):continue
                     break
-            # Source collection and its sender continue during a known market
-            # outage until this bounded worker ends. PRICE stays disconnected.
+            # A finite experiment may continue forecast-only collection. A
+            # continuous supervisor must regain PRICE without waiting out the
+            # whole window: finish existing bounded HTTP work, then return the
+            # original failure for the unchanged recovery budget/backoff.
             if lamp and result['state'] in ('NETWORK_GAP_NO_RETRY','RECONNECT_BUDGET_EXHAUSTED','NETWORK_REFUSED_NO_RETRY'):
-                while not stopped():
+                handoff=price_recovery and result['state'] in ('NETWORK_GAP_NO_RETRY','RECONNECT_BUDGET_EXHAUSTED')
+                until=min(deadline,monotonic()+HANDOFF_SECONDS) if handoff else deadline
+                while not stopped() and monotonic()<until:
+                    if handoff and not lamp.pending():break
                     progress('OBSERVING')
-                    if days.due():
+                    if not handoff and days.due():
                         progress('DISCOVERY');days.refresh(stopped,**discovery_options)
                         selected=days.selected
-                    weather_tick()
+                    weather_tick(allow_request=not handoff)
                     store.expire_closed_deliveries(clock())
                     if hasattr(progress,'observation'):progress.observation(store.runtime_status(clock()))
                     if sender:sender.tick(store,clock());sender_status()
-                    if wait(min(.25,max(0,deadline-monotonic()))):break
+                    if wait(min(.25,max(0,until-monotonic()))):break
+                if handoff:
+                    lamp.tick(store,selected,clock(),allow_request=False)
+                    lamp.close(store,clock())
             progress('STOPPING')
             store.gap('CATALOGUE_SESSION_ENDED',clock())
             if hasattr(progress,'observation'):progress.observation(store.runtime_status(clock()))
