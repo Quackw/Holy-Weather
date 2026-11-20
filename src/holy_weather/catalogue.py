@@ -7,6 +7,8 @@ from collections import Counter
 from dataclasses import dataclass, fields
 from datetime import datetime, timezone
 import json
+import os
+import stat
 import time
 import zlib
 from zoneinfo import ZoneInfo
@@ -137,6 +139,20 @@ class CatalogueConfig(Config):
 
 
 class CatalogueStore(Store):
+    def usage(self):
+        if self.cfg.region!='europe':return super().usage()
+        # Keep the exact per-transaction limit and reject every unexpected entry.
+        # DirEntry.stat(lstat) validates type and measures size in one syscall.
+        total=count=0
+        with os.scandir(self.root) as entries:
+            for entry in entries:
+                count+=1
+                info=entry.stat(follow_symlinks=False)
+                if count>32 or not stat.S_ISREG(info.st_mode):
+                    raise StorageStop('UNEXPECTED_DATA_DIRECTORY_CONTENT')
+                total+=info.st_size
+        return total
+
     def __init__(self, cfg, **kwargs):
         if not isinstance(cfg, CatalogueConfig):
             raise ValueError('CATALOGUE_CONFIG_REQUIRED')
