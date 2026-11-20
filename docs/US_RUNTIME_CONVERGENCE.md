@@ -12,6 +12,8 @@ baseline, not a crossing through the gap. Fired levels, source high-water and
 delivery receipts remain. The existing one-stat storage guard and bounded Decimal
 cache are also used for US. PRICE thresholds, quote limits, schema, sender and
 weather source policies are unchanged.
+The existing research-state cache is also enabled for US; it remains bounded
+to 16 MiB and 64 token entries, while SQLite remains the source of truth.
 
 Tests cover bounded requests, invalid or stale depth, both sides, source order,
 SQLite failure, idle weather polling, in-flight weather handoff and delivery

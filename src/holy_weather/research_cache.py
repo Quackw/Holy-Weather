@@ -1,4 +1,4 @@
-"""Bounded EU research acceleration; SQLite text remains the source of truth."""
+"""Bounded regional research acceleration; SQLite text remains the source of truth."""
 from collections import OrderedDict
 import json
 from .core import canonical,cached_price

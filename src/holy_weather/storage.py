@@ -37,7 +37,7 @@ class Store:
         self.cfg, self.closed = cfg, False
         self._rule_hash = cfg.rule_hash()  # Config is frozen for this sole writer.
         self._research_cache = None
-        if getattr(cfg,'region',None)=='europe':
+        if getattr(cfg,'region',None) in ('europe','us'):
             from .research_cache import ResearchCache
             self._research_cache = ResearchCache()
         self.seen_tops={}
