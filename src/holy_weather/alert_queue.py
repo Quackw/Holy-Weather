@@ -262,6 +262,12 @@ def settle_waits(store,at,*,sample=None,status=None,gap=None,token=None):
 
 
 def advance_waits(store,at):
+    if getattr(store.cfg,'region',None)=='europe':
+        # Claim/transport still follows a durable input barrier, even if there
+        # is no waiting or batchable work and no queue write is required.
+        store._flush_receive()
+        work=store.c.execute(f"select 1 from {store.active_delivery_source} where key like ? and (json_extract(value,'$.status')='WAITING_BID' or (json_extract(value,'$.status')='PENDING' and json_extract(value,'$.batch_market') is not null)) limit 1",(PREFIX+'%',)).fetchone()
+        if not work:return
     with store.transaction():
         settle_waits(store,at)
         # Only settled, unclaimed same-side work can combine. UNKNOWN is immutable.

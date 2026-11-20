@@ -7,6 +7,7 @@ from collections import Counter
 from dataclasses import dataclass, fields
 from datetime import datetime, timezone
 import json
+from contextlib import nullcontext
 import os
 import stat
 import time
@@ -551,7 +552,7 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
         capture = None
         if cfg.region=='europe':
             from .ws_diagnostic import armed
-            capture = armed(store)
+            capture = armed(store, receive_repair=True)
         connection_type = capture.factory(TimedClientConnection) if capture else TimedClientConnection
         if capture:result['websocket_diagnostic']=capture.result
         try:
@@ -681,15 +682,33 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
                             except TimeoutError:continue
                             if raw=='PONG':
                                 last_pong=monotonic();telemetry['application_last_pong_ms']=clock();continue
-                            telemetry['last_frame_ms']=clock()
-                            telemetry['frames']+=1
-                            frame_bytes=len(raw.encode()) if isinstance(raw,str) else len(raw)
-                            telemetry['max_frame_bytes']=max(telemetry['max_frame_bytes'],frame_bytes)
-                            if capture:capture.frame(frame_bytes);capture.phase('ROUTER')
-                            processing_start=monotonic()
-                            try:router.feed(raw,clock())
-                            finally:
-                                elapsed=round((monotonic()-processing_start)*1000,3)
+                            europe = cfg.region == 'europe'
+                            slice_end = min(deadline, next_delivery, next_stats, next_maintenance,
+                                            last_ping+10, last_pong+25, monotonic()+.008)
+                            flush_start = None
+                            with store.receive_batch() if europe else nullcontext():
+                                for frame in range(8 if europe else 1):
+                                    if raw == 'PONG':
+                                        last_pong=monotonic();telemetry['application_last_pong_ms']=clock()
+                                    else:
+                                        telemetry['last_frame_ms']=clock()
+                                        telemetry['frames']+=1
+                                        frame_bytes=len(raw.encode()) if isinstance(raw,str) else len(raw)
+                                        telemetry['max_frame_bytes']=max(telemetry['max_frame_bytes'],frame_bytes)
+                                        if capture:capture.frame(frame_bytes);capture.phase('ROUTER')
+                                        processing_start=monotonic()
+                                        try:router.feed(raw,clock())
+                                        finally:
+                                            elapsed=round((monotonic()-processing_start)*1000,3)
+                                            telemetry['processing_ms_total']+=elapsed
+                                            telemetry['processing_ms_max']=max(telemetry['processing_ms_max'],elapsed)
+                                    if not europe or frame == 7 or stop.is_set() or days.due() or monotonic()>=slice_end:
+                                        break
+                                    try:raw=ws.recv(timeout=0)
+                                    except TimeoutError:break
+                                flush_start=monotonic()
+                            if europe:
+                                elapsed=round((monotonic()-flush_start)*1000,3)
                                 telemetry['processing_ms_total']+=elapsed
                                 telemetry['processing_ms_max']=max(telemetry['processing_ms_max'],elapsed)
                 except (OSError,TimeoutError,WebSocketException) as exc:

@@ -95,7 +95,7 @@ def test_priority_crossing_does_not_wait_for_ordinary_batch(gamma,tmp_path,monke
         def send(self,raw):pass
         def recv(self,timeout):
             if senders[0].thread:senders[0].thread.join(1)
-            assert 0<timeout<=.051
+            assert 0<=timeout<=.051
             ticks[0]+=.005;frames[0]+=1
             return message(m,m['tokens']['YES'],'0.49' if frames[0]==1 else '0.71',AT+round(ticks[0]*1000))
     r=observe_catalogue(replace(cfg,duration_seconds=1,telegram_enabled=True,price_notification_filter=True),

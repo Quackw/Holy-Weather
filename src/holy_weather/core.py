@@ -231,7 +231,7 @@ def reset(state):
     return state
 
 
-def evolve(previous, sample, cfg, *, owned=False, decimal_parser=None):
+def evolve(previous, sample, cfg, *, owned=False, decimal_parser=None, _extrema=None):
     # Storage owns the just-decoded object. Public callers retain copy semantics.
     state = previous if owned and previous else deepcopy(previous or {'points': [], 'excursion': None, 'last_source': None, 'gates': {}})
     number = decimal_parser or decimal
@@ -245,8 +245,19 @@ def evolve(previous, sample, cfg, *, owned=False, decimal_parser=None):
         return reset(state), [], status
     point = {k: sample[k] for k in ('source_ms', 'received_ms', 'ask', 'input_id')}
     value = number(point['ask']); events = []
-    points = [p for p in state['points'] if 0 <= point['received_ms']-p['received_ms'] <= cfg.window_seconds*1000
-              and 0 <= point['source_ms']-p['source_ms'] <= cfg.window_seconds*1000]
+    previous_points=state['points'];window=cfg.window_seconds*1000
+    ordered=(_extrema is not None and _extrema['points'] is previous_points
+             and _extrema.get('ordered',False) and previous_points)
+    if (ordered and 0<=point['received_ms']-previous_points[0]['received_ms']<=window
+            and 0<=point['source_ms']-previous_points[0]['source_ms']<=window
+            and point['received_ms']>=previous_points[-1]['received_ms']
+            and point['source_ms']>=previous_points[-1]['source_ms']):
+        points=list(previous_points)
+    else:
+        points = [p for p in previous_points if 0 <= point['received_ms']-p['received_ms'] <= window
+                  and 0 <= point['source_ms']-p['source_ms'] <= window]
+    if _extrema is not None:
+        _extrema['retained'] = (_extrema['points'] is state['points'] and len(points)==len(state['points']))
     last = points[-1] if points else None
     for level in cfg.levels:
         gate = state['gates'].setdefault(level, {'UP': True, 'DOWN': True, 'last_ms': None})
@@ -278,7 +289,9 @@ def evolve(previous, sample, cfg, *, owned=False, decimal_parser=None):
             events.append({'type':'RETURN','status':'DETECTED','evidence':[origin,peak,point]});excursion=None
     if not excursion:
         distance = number(cfg.move)
-        origin = next((p for p in points if abs(value-number(p['ask'])) >= distance), None)
+        inside = (_extrema is not None and _extrema['retained'] and _extrema['low'] is not None
+                  and value-_extrema['low'] < distance and _extrema['high']-value < distance)
+        origin = None if inside else next((p for p in points if abs(value-number(p['ask'])) >= distance), None)
         if origin:
             events.append({'type':'MOVE','status':'DETECTED','evidence':[origin,point]});excursion={'origin':origin,'peak':point}
     if last and number(last['ask']) == value:
