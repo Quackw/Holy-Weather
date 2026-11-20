@@ -7,7 +7,7 @@ from pathlib import Path
 import sqlite3
 import time
 import zlib
-from .core import canonical, evolve, reset, sha, quote_clock_status
+from .core import canonical, evolve, reset, sha, quote_clock_status, cached_price
 
 APP_ID = 0x48574D31
 SCHEMA = '''
@@ -253,7 +253,9 @@ class Store:
             awaiting=quote and sample['token'] not in self.ready_tokens
             if awaiting and previous:
                 previous=reset(previous)
-            state, events, status = evolve(previous, sample, self.cfg)
+            us = getattr(self.cfg,'region',None)=='us'
+            state, events, status = evolve(previous, sample, self.cfg, owned=us and not awaiting,
+                                          decimal_parser=cached_price if us else None)
             if status=='ENGINE_POINT_BOUND' and self.cfg.price_alert_enabled:
                 # The accepted source clock must survive the research reset/GAP.
                 state['high_source']=sample['source_ms']
