@@ -25,6 +25,8 @@ ARM = '.ws-diagnostic-v1.arm'
 ARM_CONTENT = b'HOLY_WEATHER_EUROPE_WS_DIAGNOSTIC_V1\n'
 OUTPUT = 'ws-diagnostic-v1.jsonl'
 PENDING = '.ws-diagnostic-v1.pending'
+REPAIR_OUTPUT = 'ws-diagnostic-receive-repair.jsonl'
+REPAIR_PENDING = '.ws-diagnostic-receive-repair.pending'
 WINDOW_NS = 60_000_000_000
 MAX_FILE = 1024 * 1024
 MIN_FREE = 16 * 1024**3  # Existing accepted installation's disk reserve.
@@ -82,7 +84,9 @@ def stacks(roles):
 
 
 class Capture:
-    def __init__(self, *, clock=time.monotonic_ns):
+    def __init__(self, *, clock=time.monotonic_ns, receive_repair=False):
+        self.output = REPAIR_OUTPUT if receive_repair else OUTPUT
+        self.pending = REPAIR_PENDING if receive_repair else PENDING
         self.clock = clock
         self.buffer = bytearray(CAPACITY * RECORD.size)
         self.lock = threading.Lock()
@@ -177,8 +181,8 @@ class Capture:
             max_reconnects=store.cfg.max_reconnects,
             retired_older_than_window=self.retired_time, sent_close=getattr(getattr(close,'sent',None),'code',None),
             received_close=getattr(getattr(close,'rcvd',None),'code',None))
-        temporary = root/PENDING
-        target = root/OUTPUT
+        temporary = root/self.pending
+        target = root/self.output
         fd = None
         try:
             fd = os.open(temporary, os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW, 0o600)
@@ -218,7 +222,7 @@ class Capture:
             directory = os.open(root, os.O_RDONLY|os.O_DIRECTORY)
             try:os.fsync(directory)
             finally:os.close(directory)
-            self.result = dict(status='SAVED', file=OUTPUT, bytes=size, sha256=digest.hexdigest(), records=written)
+            self.result = dict(status='SAVED', file=self.output, bytes=size, sha256=digest.hexdigest(), records=written)
         except Exception:
             # Preserve a partial file rather than silently retrying/overwriting.
             self.result = dict(status='NOT_SAVED', reason='DIAGNOSTIC_WRITE_OR_PUBLICATION_FAILED')
@@ -445,12 +449,18 @@ class Session:
         self.metadata['sampler_stopped'] = self.thread is None or not self.thread.is_alive()
 
 
-def armed(store):
+def armed(store, *, receive_repair=False):
     """No config/schema migration or inherited credential/environment channel."""
     if store.cfg.region != 'europe':
         return None
     try:
-        if (store.root/OUTPUT).exists() or (store.root/PENDING).exists():return None
+        repaired = False
+        if receive_repair:
+            if any((store.root/name).exists() for name in (PENDING, REPAIR_PENDING, REPAIR_OUTPUT)):
+                return None
+            repaired = (store.root/OUTPUT).exists()
+        elif (store.root/OUTPUT).exists() or (store.root/PENDING).exists():
+            return None
         fd = os.open(store.root/ARM, os.O_RDONLY|os.O_NOFOLLOW)
         try:
             info = os.fstat(fd)
@@ -459,6 +469,6 @@ def armed(store):
                 return None
             if os.read(fd, 64)!=ARM_CONTENT:return None
         finally:os.close(fd)
-        return Capture()
+        return Capture(receive_repair=repaired)
     except Exception:
         return None

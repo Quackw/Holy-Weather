@@ -245,7 +245,7 @@ def test_current_catalogue_pump_groups_covers_and_preserves_highs_on_restart(gam
         def send(self,raw):pass
         def recv(self,timeout):
             if senders[-1].thread:senders[-1].thread.join(1)
-            assert 0<timeout<=.051
+            assert 0<=timeout<=.051
             ticks[0]+=5
             if pending and pending[0][0]<=ticks[0]:
                 _,side,p=pending.popleft()

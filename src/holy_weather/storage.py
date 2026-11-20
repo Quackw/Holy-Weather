@@ -1,5 +1,6 @@
 """One owner, transactional inputs/decisions/state, bounded private SQLite."""
 from contextlib import contextmanager
+from copy import deepcopy
 import fcntl
 import json
 import os
@@ -34,6 +35,11 @@ class Store:
 
     def __init__(self, cfg, *, session=True):
         self.cfg, self.closed = cfg, False
+        self._rule_hash = cfg.rule_hash()  # Config is frozen for this sole writer.
+        self._research_cache = None
+        if getattr(cfg,'region',None)=='europe':
+            from .research_cache import ResearchCache
+            self._research_cache = ResearchCache()
         self.seen_tops={}
         self.connected=False
         self.ready_tokens=set()
@@ -115,8 +121,123 @@ class Store:
         if self.usage() >= self.cfg.storage_bytes-self.reserve:
             raise StorageStop('STORAGE_BUDGET_CAPTURE_STOPPED')
 
+    def _checkpoint_wal(self):
+        wal = self.root/'monitor.sqlite3-wal'
+        if wal.exists() and wal.stat().st_size > 1024*1024:
+            self.c.execute('pragma wal_checkpoint(truncate)')
+
+    def _flush_receive(self):
+        batch = getattr(self, '_receive_batch', None)
+        if not batch or batch['broken'] or not batch['pending']:
+            return
+        if batch['active']:
+            raise StorageStop('RECEIVE_COMMIT_INSIDE_INPUT')
+        try:
+            self.c.execute('commit')
+        except BaseException:
+            batch['broken'] = True
+            if self.c.in_transaction:
+                self.c.execute('rollback')
+            raise
+        finally:
+            batch['pending'] = batch['bytes'] = 0
+        self._checkpoint_wal()
+        self._guard()
+
+    @contextmanager
+    def receive_batch(self):
+        """EU receive slice only. No waits or sender effects inside this scope."""
+        if getattr(self.cfg, 'region', None) != 'europe':
+            yield
+            return
+        if getattr(self, '_receive_batch', None) or self.c.in_transaction:
+            raise StorageStop('NESTED_RECEIVE_BATCH')
+        batch = dict(pending=0, bytes=0, active=False, broken=False)
+        self._receive_batch = batch
+        try:
+            yield
+        finally:
+            try:
+                if not batch['broken']:
+                    self._flush_receive()
+            finally:
+                self._receive_batch = None
+
+    @contextmanager
+    def _input_transaction(self, sample, raw_bytes):
+        batch = getattr(self, '_receive_batch', None)
+        budget = None
+        if batch and sample['kind'] != 'market_resolved' and raw_bytes <= 16*1024:
+            row = self.c.execute('select length(cast(payload as blob)) from state where token=?',
+                                 (sample['token'],)).fetchone()
+            state_bytes = row[0] if row else 0
+            if state_bytes <= 64*1024:
+                budget = raw_bytes + state_bytes + 16*1024
+        if budget is None:
+            with self.transaction():
+                yield
+            return
+        if batch['bytes'] + budget > 256*1024:
+            self._flush_receive()
+        try:
+            self._guard()
+        except BaseException:
+            batch['broken'] = True
+            if self.c.in_transaction:
+                self.c.execute('rollback')
+            batch['pending'] = batch['bytes'] = 0
+            raise
+        try:
+            if not self.c.in_transaction:
+                self.c.execute('begin immediate')
+            self.c.execute('savepoint hw_receive_input')
+        except BaseException:
+            batch['broken'] = True
+            batch['pending'] = batch['bytes'] = 0
+            if self.c.in_transaction:
+                self.c.execute('rollback')
+            raise
+        batch['active'] = True
+        try:
+            yield
+        except BaseException:
+            try:
+                self.c.execute('rollback to hw_receive_input')
+                self.c.execute('release hw_receive_input')
+            except BaseException:
+                batch['broken'] = True
+                if self.c.in_transaction:
+                    self.c.execute('rollback')
+                raise
+            finally:
+                batch['active'] = False
+            if batch['pending']:
+                self._flush_receive()
+            elif self.c.in_transaction:
+                self.c.execute('rollback')
+            raise
+        else:
+            try:
+                self.c.execute('release hw_receive_input')
+            except BaseException:
+                batch['broken'] = True
+                batch['pending'] = batch['bytes'] = 0
+                if self.c.in_transaction:
+                    self.c.execute('rollback')
+                raise
+            finally:
+                batch['active'] = False
+            batch['pending'] += 1
+            batch['bytes'] += budget
+            wal = self.root/'monitor.sqlite3-wal'
+            if (batch['pending'] >= 4 or
+                    wal.exists() and wal.stat().st_size > 1024*1024):
+                self._flush_receive()
+
     @contextmanager
     def transaction(self):
+        # Queue claim/ACK, GAP, metadata and weather writes are durable barriers.
+        self._flush_receive()
         self._guard(); self.c.execute('begin immediate')
         try:
             yield
@@ -125,9 +246,7 @@ class Store:
             if self.c.in_transaction:
                 self.c.execute('rollback')
             raise
-        wal = self.root/'monitor.sqlite3-wal'
-        if wal.exists() and wal.stat().st_size > 1024*1024:
-            self.c.execute('pragma wal_checkpoint(truncate)')
+        self._checkpoint_wal()
 
     def bind(self, market, receipt):
         with self.transaction():
@@ -227,7 +346,7 @@ class Store:
             raise ValueError('INPUT_BOUND')
         if self.history_seen.contains(sample['id']):
             return {'status':'DUPLICATE','events':[],'raw_bytes':0,'compressed_bytes':0}
-        with self.transaction():
+        with self._input_transaction(sample, len(raw)):
             prior = self.c.execute('select id from inputs where identity=?', (sample['id'],)).fetchone()
             if prior:
                 return {'status': 'DUPLICATE', 'events': [], 'raw_bytes':0,'compressed_bytes':0}
@@ -248,20 +367,23 @@ class Store:
                 return {'status': 'AFTER_RESOLUTION', 'events': []}
             sample = dict(sample, input_id=input_id)
             row = self.c.execute('select payload from state where token=?', (sample['token'],)).fetchone()
-            previous = json.loads(row[0]) if row else None
+            cache=getattr(self,'_research_cache',None)
+            if cache:previous,hint=cache.take(sample['token'],row[0] if row else None)
+            else:previous,hint=(json.loads(row[0]) if row else None),None
             quote=sample['kind']!='last_trade_price'
             awaiting=quote and sample['token'] not in self.ready_tokens
             if awaiting and previous:
                 previous=reset(previous)
             europe = getattr(self.cfg,'region',None)=='europe'
             state, events, status = evolve(previous, sample, self.cfg, owned=europe and not awaiting,
-                                          decimal_parser=cached_price if europe else None)
+                                          decimal_parser=cached_price if europe else None, _extrema=hint)
             if status=='ENGINE_POINT_BOUND' and self.cfg.price_alert_enabled:
                 # The accepted source clock must survive the research reset/GAP.
                 state['high_source']=sample['source_ms']
             if awaiting and sample['kind']=='price_change' and status=='FRESH':
                 state, events, status = reset(previous if previous is not None else state), [], 'AWAITING_BASELINE'
-            self.c.execute('insert or replace into state values(?,?)', (sample['token'], canonical(state)))
+            state_raw=cache.encode(state,hint) if cache else canonical(state)
+            self.c.execute('insert or replace into state values(?,?)', (sample['token'], state_raw))
             keys = ('token','kind','source_ms','received_ms','bid','ask','bid_size','ask_size','trade','trade_size','snapshot_trade')
             self.c.execute('insert into samples values(?,?,?,?,?,?,?,?,?,?,?,?,?)', (input_id, *(sample[k] for k in keys), status))
             category = 'trade' if sample['kind']=='last_trade_price' else 'quote'
@@ -275,7 +397,7 @@ class Store:
                     market=json.loads(self.c.execute('select payload from market where id=1').fetchone()[0])
                     event['lamp']=lamp_context(self.lamp_state(),event['weather'],market,sample['received_ms'])
                     event['prices']=self.price_context(sample['received_ms'])
-                ident = sha([sample['id'], self.cfg.rule_hash(), event['type'], event.get('level'), event.get('direction'), event['status']])
+                ident = sha([sample['id'], self._rule_hash, event['type'], event.get('level'), event.get('direction'), event['status']])
                 self.c.execute('insert into events values(?,?,?,?,?,?,?,?)', (ident, input_id, sample['token'], sample['received_ms'], event['type'], event['status'], event.get('reason'), canonical(event)))
                 for ref in {p['input_id'] for p in event['evidence']}:
                     self.c.execute('insert into event_inputs values(?,?)', (ident, ref))
@@ -294,7 +416,13 @@ class Store:
                 from .alert_queue import settle_waits
                 settle_waits(self,sample['received_ms'],sample=sample,status=status)
             result={'status': status, 'research_status':research_status, 'events': events,'raw_bytes':len(raw),'compressed_bytes':len(compressed)}
-        # Readiness changes only after the input/state transaction commits.
+        if cache:cache.keep(sample['token'],state_raw,state,hint)
+        if cache:
+            # Only evidence points can alias the privately owned research state.
+            for event in result['events']:
+                if event.get('evidence'):event['evidence']=deepcopy(event['evidence'])
+        # Readiness follows this input's atomic SQL writes; the receiver flushes
+        # pending inputs before housekeeping or any sender side effect.
         if quote:
             if status=='FRESH' and sample['kind'] in ('book','best_bid_ask'):
                 self.ready_tokens.add(sample['token'])
@@ -508,6 +636,7 @@ class Store:
 
     def close(self):
         if not self.closed:
+            self._flush_receive()
             self.c.execute('pragma wal_checkpoint(truncate)')
             self.history_seen.close()
             self.c.close(); self.lock.close(); self.closed = True
