@@ -18,14 +18,22 @@ ACCEPTED = 'bb1cee26152baf8ff6a254859f66fb9824757dd5'
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def accepted_catalogue(monkeypatch):
-    source = subprocess.check_output(['git', 'show', ACCEPTED+':src/holy_weather/catalogue.py'], cwd=ROOT)
-    module = types.ModuleType('holy_weather._accepted_timezone_probe')
+def counterfactual_catalogue(monkeypatch):
+    # Compare the current tree with precisely the retention removed. A historical
+    # module has a different CatalogueConfig after later optional US additions.
+    source = Path(catalogue.__file__).read_text()
+    retained = """        # Europe's ten zones exceed ZoneInfo's eight-entry strong cache. Keep
+        # them alive for this worker, avoiding TZif rereads on every frame.
+        self._zones=({v[2]:ZoneInfo(v[2]) for v in store.cfg.cities.values()}
+                     if store.cfg.region=='europe' else {})
+"""
+    assert source.count(retained) == 1
+    source = source.replace(retained, '')
+    module = types.ModuleType('holy_weather._counterfactual_timezone_probe')
     module.__package__ = 'holy_weather'
     monkeypatch.setitem(sys.modules, module.__name__, module)
-    exec(compile(source, ACCEPTED+'/catalogue.py', 'exec'), module.__dict__)
+    exec(compile(source, 'counterfactual/catalogue.py', 'exec'), module.__dict__)
     return module
-
 
 def test_europe_date_checks_do_not_reload_tzif_per_market_frame(gamma, tmp_path, monkeypatch):
     cfg, markets = setup(gamma, tmp_path)
@@ -60,7 +68,7 @@ def test_europe_date_checks_do_not_reload_tzif_per_market_frame(gamma, tmp_path,
 
 def test_native_20s_burst_before_after_timezone_retention(gamma, tmp_path, monkeypatch, record_property):
     from europe_timezone_burst import burst
-    old = accepted_catalogue(monkeypatch)
+    old = counterfactual_catalogue(monkeypatch)
     cfg, markets = setup(gamma, tmp_path)
     before = burst(old, replace(cfg, data_dir=str(tmp_path/'old')), markets)
     after = burst(catalogue, replace(cfg, data_dir=str(tmp_path/'new')), markets)
@@ -81,7 +89,7 @@ def test_native_20s_burst_before_after_timezone_retention(gamma, tmp_path, monke
 
 
 def test_same_inputs_preserve_all_price_tables_with_timezone_retention(gamma, tmp_path, monkeypatch):
-    old = accepted_catalogue(monkeypatch)
+    old = counterfactual_catalogue(monkeypatch)
     cfg, markets = setup(gamma, tmp_path)
     results = []
     for name, module in [('old', old), ('new', catalogue)]:

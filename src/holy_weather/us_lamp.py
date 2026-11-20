@@ -8,6 +8,7 @@ import threading
 import time
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from zoneinfo import ZoneInfo
 
 from .core import US_CITIES, canonical, sha
 from .lamp import MAX_BODY, nomads_source
@@ -86,6 +87,7 @@ class Collection:
             row=store.c.execute('select value from meta where key=?',(KEY,)).fetchone()
             self.state=json.loads(row[0]) if row else dict(next_ms=0,attempts=0,blocked=False)
         markets=[m for c,m in store.markets.items() if c in selected and store.active(c,at)]
+        independent=store.cfg.us_weather_continuity_enabled
         try:result=self.results.get_nowait()
         except queue.Empty:result=None
         if result is not None:
@@ -94,9 +96,12 @@ class Collection:
             statuses={}
             for station,receipt in result['receipts'].items():
                 contracts=[m for m in markets if m['station']==station]
-                if contracts:
-                    store.record_lamp(receipt,contracts[0],at,markets=contracts)
-                    state=store.lamp_state(contracts[0])
+                if contracts or independent:
+                    _,_,zone=next(v for v in US_CITIES.values() if v[1]==station)
+                    descriptor=contracts[0] if contracts else dict(station=station,timezone=zone,
+                        date=datetime.fromtimestamp(at/1000,ZoneInfo(zone)).date().isoformat())
+                    store.record_lamp(receipt,descriptor,at,markets=contracts)
+                    state=store.lamp_state(descriptor)
                     statuses[station]=dict(status=state['status'],reason=state.get('reason'),issue_ms=state.get('issue_ms'))
             self.state.update(status=result['status'],blocked=result['terminal'],
                               bytes=result.get('bytes'),file_sha256=result.get('file_sha256'),stations=statuses)
@@ -108,7 +113,7 @@ class Collection:
                 self.state['last_success_ms']=self.state['cycle_ms']
                 self.state['next_ms']=self.state['cycle_ms']+3600000+PUBLICATION_WAIT_MS
             store.set_meta(KEY,self.state)
-        if self.state['blocked'] or at<self.state['next_ms'] or not markets:return
+        if self.state['blocked'] or at<self.state['next_ms'] or not (markets or independent):return
         if self.thread is not None and self.thread.is_alive():return
         cycle=cycle_at(at)
         attempts=self.state['attempts'] if self.state.get('cycle_ms')==cycle else 0

@@ -12,9 +12,12 @@ from .lamp_card import position
 from .weather import WEATHER_AGE_MS
 
 HOUR = 3_600_000
+LOCAL_SEND_START = 8
+LOCAL_SEND_END = 20
+MAX_PEAK_LEAD_MS = 3 * HOUR
 
 
-def outlook(weather, forecast, market, at):
+def outlook(weather, forecast, market, at, *, require_warming=True):
     hours, status = lamp_alert.remaining(forecast, market, at)
     if status != 'OK':
         return None, status
@@ -59,7 +62,7 @@ def outlook(weather, forecast, market, at):
         qualifying.append(Decimal(c_to_f(c)))
     observed = max(qualifying)
     peak = max(map(Decimal, hours.values()))
-    if peak <= now:
+    if require_warming and peak <= now:
         return None, 'NO_FUTURE_WARMING'
     when = min(h for h, temp in hours.items() if Decimal(temp) == peak)
     return dict(current_f=str(now), observed_max_f=str(observed), future_peak_f=str(peak),
@@ -67,7 +70,33 @@ def outlook(weather, forecast, market, at):
                 observed_ms=latest['observed_ms']), 'OK'
 
 
+def send_window(market, view, at):
+    """Keep the sole city/day card until local daytime near a future peak."""
+    zone = ZoneInfo(market['timezone'])
+    local = datetime.fromtimestamp(at / 1000, zone)
+    if local.date().isoformat() != market['date']:
+        return None, 'LOCAL_DATE_ENDED'
+    if not LOCAL_SEND_START <= local.hour < LOCAL_SEND_END:
+        return None, 'WAITING_LOCAL_SEND_WINDOW'
+    lead = view['peak_ms'] - at
+    if lead <= 0:
+        return None, 'FORECAST_PEAK_PASSED'
+    if lead > MAX_PEAK_LEAD_MS:
+        return None, 'WAITING_PEAK_WINDOW'
+    if Decimal(view['future_peak_f']) < Decimal(view['observed_max_f']):
+        return None, 'PEAK_ALREADY_OBSERVED'
+    return dict(policy='US_CITY_PRE_PEAK_WINDOW_V1',
+                opens_ms=max(int(datetime.combine(local.date(), time(LOCAL_SEND_START), zone).timestamp()*1000),
+                             view['peak_ms']-MAX_PEAK_LEAD_MS),
+                closes_ms=min(int(datetime.combine(local.date(), time(LOCAL_SEND_END), zone).timestamp()*1000),
+                              view['peak_ms']),
+                maximum_lead_ms=MAX_PEAK_LEAD_MS), 'OK'
+
+
 def record(store, markets, forecast, at):
+    if getattr(store.cfg,'us_lamp_notice_mode','pre_peak')=='warming_hourly':
+        from .lamp_hourly import record as hourly_record
+        return hourly_record(store,markets,forecast,at)
     if not markets or forecast.get('status') != 'OK':
         return
     market = markets[0]
@@ -87,6 +116,8 @@ def record(store, markets, forecast, at):
     weather = catalogue_metar.load(store, catalogue_metar.PREFIX + station)
     result, status = outlook(weather, forecast, market, at)
     if result:
+        window, status = send_window(market, result, at)
+    if status == 'OK':
         matches = [m for m in markets if m['station'] == station and m['date'] == day
                    and m['event_id'] == market['event_id']
                    and m['metadata_state'] == 'OPEN_AT_DISCOVERY_RECEIPT'
@@ -108,7 +139,8 @@ def record(store, markets, forecast, at):
     event_id = sha(['US_LAMP_PRE_PEAK_V1', station, day])
     event = dict(type='LAMP_ALERT', track='LAMP', status='DETECTED', reason='PRE_PEAK_WARMING',
                  station=station, at_ms=at, market_url=market['url'], bucket=market['bucket'],
-                 city_outlook=result, current_forecast=forecast, metar=weather)
+                 city_outlook=result, current_forecast=forecast, metar=weather,
+                 delivery_window=window)
     store.c.execute('insert into events values(?,?,?,?,?,?,?,?)',
                     (event_id, forecast['input_id'], token, at, 'LAMP_ALERT', 'DETECTED',
                      event['reason'], canonical(event)))

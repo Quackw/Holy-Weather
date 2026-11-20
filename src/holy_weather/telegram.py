@@ -66,9 +66,13 @@ class Sender:
             p,r,completed=self.results.get_nowait()
         except queue.Empty:pass
         else:
-            finish(store,p,r,completed)
+            receipt=finish(store,p,r,completed)
             self.inflight=False
-            if r['status']!='SENT':
+            local_city_expiry=(not p['test'] and r.get('status')=='REJECTED'
+                and r.get('reason')=='QUOTE_EXPIRED_BEFORE_HTTP'
+                and receipt.get('track')=='LAMP_ALERT'
+                and receipt.get('delivery_policy') in ('US_CITY_PRE_PEAK_WINDOW_V1','US_WARMING_HOURLY_V2'))
+            if r['status']!='SENT' and not local_city_expiry:
                 self.stopped=True
                 self.disabled_reason='SEND_RESULT_UNKNOWN' if r['status']=='UNKNOWN' else 'SEND_RESULT_NOT_SENT'
     def tick(self,store,at):

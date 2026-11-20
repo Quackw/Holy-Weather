@@ -344,10 +344,10 @@ class Store:
             self.c.execute('insert or replace into meta values(?,?)',(key,canonical(state)))
             if regional and self.cfg.catalogue_metar_enabled:
                 from .city_peak import record
-                record(self, markets or [market], state, available_ms)
+                record(self, [market] if markets is None else markets, state, available_ms)
             elif self.cfg.lamp_alert_enabled or regional:
                 from .lamp_alert import record
-                for contract in markets or [market]:
+                for contract in [market] if markets is None else markets:
                     if (contract['station'],contract['date'])!=(market['station'],market['date']):
                         raise ValueError('LAMP_CONTRACT_STATION_DATE_MISMATCH')
                     record(self,contract,state,available_ms,verified_markets=markets or (),

@@ -112,6 +112,8 @@ class CatalogueConfig(Config):
     alert_queue_enabled: bool = True
     us_lamp_enabled: bool = False
     catalogue_metar_enabled: bool = False
+    us_weather_continuity_enabled: bool = False
+    us_lamp_notice_mode: str = 'pre_peak'
 
     def __post_init__(self):
         super().__post_init__()
@@ -120,6 +122,12 @@ class CatalogueConfig(Config):
         if self.region not in ('us','europe'):raise ValueError('CATALOGUE_REGION')
         if type(self.us_lamp_enabled) is not bool or self.us_lamp_enabled and self.region!='us':
             raise ValueError('CATALOGUE_LAMP_REQUIRES_US')
+        if (type(self.us_weather_continuity_enabled) is not bool
+                or self.us_lamp_notice_mode not in ('pre_peak','warming_hourly')):
+            raise ValueError('CATALOGUE_US_WEATHER_POLICY')
+        if (self.us_weather_continuity_enabled or self.us_lamp_notice_mode!='pre_peak') and not (
+                self.region=='us' and self.us_lamp_enabled and self.catalogue_metar_enabled):
+            raise ValueError('CATALOGUE_US_WEATHER_REQUIRES_SOURCES')
         if (self.weather_context or self.lamp_context or self.lamp_alert_enabled
                 or not self.price_alert_enabled or not self.alert_queue_enabled):
             raise ValueError('CATALOGUE_PRICE_ONLY')
@@ -380,10 +388,11 @@ class DayDiscovery:
         at=self.clock()
         return local_days(at,self.store.cfg.cities)!=self.days or any(at>=v for v in self.retry.values())
 
-    def refresh(self, stopped=lambda:False):
+    def refresh(self, stopped=lambda:False, on_poll=lambda:None):
         s=self.store
         for city,day in local_days(self.clock(),s.cfg.cities).items():
             if stopped():break
+            on_poll()
             at=self.clock()
             # Date may change while earlier cities are being fetched.
             day=local_days(at,s.cfg.cities)[city]
@@ -457,12 +466,13 @@ class DayDiscovery:
                 state['next_ms']=self.clock()+300000
                 self.retry[city]=state['next_ms']
             s.set_meta(key,state)
+            on_poll()
         s.expire_closed_deliveries(self.clock(),self.selected)
 
 
 def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=None, token=None, metar_fetch=None,
                       clock=None, monotonic=time.monotonic, stop=None, wait=None, progress=None, session_day=None,
-                      on_sender_status=None,rotate_bytes=None,lamp_fetch=None):
+                      on_sender_status=None,rotate_bytes=None,lamp_fetch=None,weather_only=False):
     """Finite session with local-day revalidation; no service or extended deadline."""
     import threading
     from websockets.exceptions import WebSocketException
@@ -472,6 +482,8 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
     if connect is None:
         from websockets.sync.client import connect
     clock=clock or millis;stop=stop or threading.Event();wait=wait or stop.wait
+    if weather_only and not cfg.us_weather_continuity_enabled:
+        raise ValueError('WEATHER_ONLY_REQUIRES_US_CONTINUITY')
     if rotate_bytes is not None and (type(rotate_bytes) is not int or not 8*1024**2<=rotate_bytes<=cfg.storage_bytes-32*1024**2):
         raise ValueError('CATALOGUE_ROTATION_BOUND')
     if cfg.telegram_enabled and not token:raise ValueError('EXPLICIT_TELEGRAM_TOKEN_REQUIRED')
@@ -497,6 +509,16 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
                 with store.transaction():
                     record(store, markets, store.lamp_state(markets[0]), at)
 
+    selected=set();next_weather_review=0
+    def weather_tick():
+        nonlocal next_weather_review
+        if metar:tick_metar()
+        if lamp:lamp.tick(store,selected,clock())
+        if cfg.us_lamp_notice_mode=='warming_hourly' and monotonic()>=next_weather_review:
+            from .lamp_hourly import review
+            review(store,selected,clock())
+            next_weather_review=monotonic()+30
+
     result={'cities':{},'state':'PREPARING','telegram_enabled':cfg.telegram_enabled,'weather_enabled':metar is not None}
     reported_sender=None
     def sender_status():
@@ -521,7 +543,12 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
             deadline=monotonic()+cfg.duration_seconds
             days=DayDiscovery(store,discover,clock,session_day=session_day)
             stopped=lambda:stop.is_set() or monotonic()>=deadline
-            progress('DISCOVERY');days.refresh(stopped)
+            def discovery_tick():
+                nonlocal selected
+                selected=days.selected
+                weather_tick();progress('DISCOVERY')
+            discovery_options={'on_poll':discovery_tick} if cfg.us_weather_continuity_enabled else {}
+            progress('DISCOVERY');days.refresh(stopped,**discovery_options)
             selected=days.selected
             result['cities']=days.results
             router=Router(store,selected)
@@ -536,12 +563,18 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
                     next_observation=monotonic()+10
                 if days.due():
                     store.gap('LOCAL_DAY_OR_DISCOVERY_REFRESH',clock())
-                    progress('DISCOVERY');days.refresh(stopped)
+                    progress('DISCOVERY');days.refresh(stopped,**discovery_options)
                     selected=days.selected;result['cities']=days.results
                     router.selected=set(selected)
                     for condition in selected:router.per_market.setdefault(condition,Counter())
-                if metar:tick_metar()
-                if lamp:lamp.tick(store,selected,clock())
+                weather_tick()
+                if weather_only:
+                    store.expire_closed_deliveries(clock(),selected)
+                    if sender:sender.tick(store,clock());sender_status()
+                    if rotate_bytes is not None and store.usage()>=rotate_bytes:
+                        result['rotation_reason']='STORAGE_CHECKPOINT_DUE';break
+                    if wait(min(.25,max(0,deadline-monotonic()))):break
+                    continue
                 tokens=[t for t,c in store.tokens.items() if c in selected and store.active(c,clock())]
                 if not tokens:
                     result['state']='NO_VERIFIED_CURRENT_MARKETS'
@@ -602,8 +635,7 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
                             if monotonic()>=next_delivery:
                                 if capture:capture.phase('DELIVERY')
                                 delivery_start=monotonic()
-                                if metar:tick_metar()
-                                if lamp:lamp.tick(store,selected,clock())
+                                weather_tick()
                                 # Always recheck lifecycle immediately before send,
                                 # including between throttled global market scans.
                                 store.expire_closed_deliveries(at)
@@ -686,9 +718,12 @@ def observe_catalogue(cfg, *, connect=None, discover=discover_city, transport=No
             if lamp and result['state'] in ('NETWORK_GAP_NO_RETRY','RECONNECT_BUDGET_EXHAUSTED','NETWORK_REFUSED_NO_RETRY'):
                 while not stopped():
                     progress('OBSERVING')
-                    lamp.tick(store,selected,clock())
+                    if days.due():
+                        progress('DISCOVERY');days.refresh(stopped,**discovery_options)
+                        selected=days.selected
+                    weather_tick()
                     store.expire_closed_deliveries(clock())
-                    if metar:tick_metar()
+                    if hasattr(progress,'observation'):progress.observation(store.runtime_status(clock()))
                     if sender:sender.tick(store,clock());sender_status()
                     if wait(min(.25,max(0,deadline-monotonic()))):break
             progress('STOPPING')
@@ -731,6 +766,8 @@ def main():
     parser.add_argument('--send',action='store_true')
     parser.add_argument('--catalogue-metar',action='store_true',help='Collect regional station METAR; combine with US LAMP for one city card')
     parser.add_argument('--us-lamp',action='store_true',help='Opt in to independent NOAA LAMP for the US catalogue')
+    parser.add_argument('--us-weather-continuity',action='store_true',help='Collect US weather without verified markets; controller also collects during network quota waits')
+    parser.add_argument('--us-lamp-notice-mode',choices=('pre_peak','warming_hourly'),default='pre_peak')
     parser.add_argument('--price-notification-filter',action='store_true',
                         help='Fast 70/80 delivery, ask-only bid confirmation, and ordinary same-side batches')
     parser.add_argument('--price-batch-seconds',type=int,choices=(10,15,30),default=10)
@@ -739,7 +776,8 @@ def main():
     cfg=CatalogueConfig(region=args.region,city='new-york' if args.region=='us' else 'london',
                         data_dir=args.data_dir,duration_seconds=args.seconds,telegram_enabled=args.send,
                         price_notification_filter=args.price_notification_filter,price_batch_seconds=args.price_batch_seconds,
-                        us_lamp_enabled=args.us_lamp,catalogue_metar_enabled=args.catalogue_metar)
+                        us_lamp_enabled=args.us_lamp,catalogue_metar_enabled=args.catalogue_metar,
+                        us_weather_continuity_enabled=args.us_weather_continuity,us_lamp_notice_mode=args.us_lamp_notice_mode)
     result=observe_catalogue(cfg,token=token_from_env() if args.send else None,stop=stop)
     print(json.dumps(result,ensure_ascii=False,sort_keys=True))
     return 0 if result['state']=='COMPLETED_WINDOW' else 2

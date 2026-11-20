@@ -71,7 +71,7 @@ def test_chicago_one_card_for_day_and_atomic_restart(gamma, tmp_path):
     cfg = replace(cfg, catalogue_metar_enabled=True)
     chicago = [(m,r) for m,r in bindings if m['station']=='KORD']
     markets = []
-    at = AT+city_peak.HOUR
+    at = AT+3*city_peak.HOUR  # 09:00 Chicago; inside the new local send window.
     with catalogue.CatalogueStore(cfg, session=False) as store:
         for (m,r),bucket in zip(chicago, ('44-45°F','46-47°F','48°F or higher')):
             m = dict(m,bucket=bucket,url=m['url'].rsplit('/',1)[0]+'/'+bucket[:2]+'f')
@@ -83,7 +83,7 @@ def test_chicago_one_card_for_day_and_atomic_restart(gamma, tmp_path):
         w,_ = weather.update({},r,m,at)
         store.set_meta(catalogue_metar.PREFIX+'KORD',dict(w,day=m['date']))
         # Past high 44.6 F, current 41 F, future 47 F.
-        second = receipt('KORD',47,at,ISSUE+city_peak.HOUR)
+        second = receipt('KORD',47,at,ISSUE+3*city_peak.HOUR)
         store.c.execute("create temp trigger fault before insert on meta when new.key like 'alert_delivery_v1:%' begin select raise(abort,'queue fault'); end")
         with pytest.raises(sqlite3.IntegrityError,match='queue fault'):
             store.record_lamp(second,m,at,markets=markets)
@@ -95,14 +95,14 @@ def test_chicago_one_card_for_day_and_atomic_restart(gamma, tmp_path):
         assert event['market_url']==markets[1]['url']
         key,value = store.c.execute("select key,value from meta where key like 'alert_delivery_v1:%'").fetchone()
         sent = json.loads(value)
-        assert '+6°F' in sent['html'] and '46–47°F' in sent['html'] and '08:00 CST' in sent['html']
+        assert '+6°F' in sent['html'] and '46–47°F' in sent['html'] and '10:00 CST' in sent['html']
         assert sent['expires_ms']==event['city_outlook']['peak_ms']-1
         p = alert_queue.preview(store,key)
         assert alert_queue.claim(store,p,at+1)
         alert_queue.finish(store,p,dict(status='SENT',message_id=1),at+2)
     with catalogue.CatalogueStore(cfg,session=False) as store:
         store.record_lamp(second,m,at+5,markets=markets)
-        store.record_lamp(receipt('KORD',50,at+city_peak.HOUR,ISSUE+2*city_peak.HOUR),m,
+        store.record_lamp(receipt('KORD',50,at+city_peak.HOUR,ISSUE+4*city_peak.HOUR),m,
                           at+city_peak.HOUR,markets=markets)
         assert len(events(store))==1
         assert not alert_queue.claim(store,p,at+6)
@@ -191,11 +191,11 @@ def test_block_missing_ambiguous_and_closed_daily_bucket(gamma,tmp_path):
     group=[(m,r) for m,r in bindings if m['station']=='KORD']
     markets=[m for m,_ in group]
     m=markets[0]
-    at=AT+city_peak.HOUR
+    at=AT+3*city_peak.HOUR  # Keep this coverage/bucket test inside daytime.
     with catalogue.CatalogueStore(cfg,session=False) as s:
         for market,r in group:s.bind(market,r)
         s.record_lamp(receipt('KORD'),m,AT,markets=markets)
-        f=receipt('KORD',47,at,ISSUE+city_peak.HOUR)
+        f=receipt('KORD',47,at,ISSUE+3*city_peak.HOUR)
         s.record_lamp(f,m,at,markets=markets)
         get_status=lambda:catalogue_metar.load(s,'us_lamp_city_v1:KORD')['status']
         assert get_status()=='METAR_UNAVAILABLE'

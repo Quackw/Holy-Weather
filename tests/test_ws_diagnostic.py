@@ -287,7 +287,11 @@ def test_actual_68e7d93_rollback_preserves_new_records_queue_and_diagnostic(gamm
         if name.endswith('.py'):
             path=old/Path(name).relative_to('src');path.parent.mkdir(parents=True,exist_ok=True)
             path.write_bytes(subprocess.check_output(['git','show',base+':'+name]))
-    configuration=tmp_path/'config.json';configuration.write_text(json.dumps(asdict(cfg)))
+    settings=asdict(cfg)
+    # The rollback plan explicitly disables options unknown to this older code.
+    assert settings.pop('us_weather_continuity_enabled') is False
+    assert settings.pop('us_lamp_notice_mode')=='pre_peak'
+    configuration=tmp_path/'config.json';configuration.write_text(json.dumps(settings))
     snapshot=tmp_path/'expected.json';snapshot.write_text(json.dumps(expected))
     script='''
 import json,sys
