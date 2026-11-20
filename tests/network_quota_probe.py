@@ -29,6 +29,7 @@ from test_us_lamp import native
 os.umask(0o077)
 REAL_MONOTONIC=time.monotonic
 DUMMY_TOKEN='123456:offline_only_not_a_real_telegram_credential'
+WEATHER_CONTINUITY=os.environ.get('HW_PROBE_WEATHER_CONTINUITY')=='1'
 if sys.platform!='linux':
     l.own_identity=lambda:dict(boot='MAC_MODEL_NOT_LINUX',pid=os.getpid(),start_ticks=1,uid=os.getuid(),exe=sys.executable)
     l.alive=lambda identity:False
@@ -115,6 +116,7 @@ def worker(root,nonce,fd):
 def fixture(base):
     market,receipt=binding(load(base/'gamma.json'),'new-york','2026-11-14')
     cfg=replace(config('new-york',base/'data'),telegram_enabled=True)
+    if WEATHER_CONTINUITY:cfg=replace(cfg,us_weather_continuity_enabled=True)
     t0=instant('new-york','2026-11-14',11,39)
     old_issue=instant('new-york','2026-11-14',10,30)
     with catalogue.CatalogueStore(cfg,session=False) as s:
@@ -135,7 +137,7 @@ def fixture(base):
     (base/'fixture.json').write_text(canonical(dict(market=market,receipt=receipt)))
     from test_price_recovery import private_tree
     private_tree(base/'data')
-    plan=r.Plan(cfg,None,None,phase_seconds=20,continuous=True)
+    plan=r.Plan(cfg,None,None,phase_seconds=1200 if WEATHER_CONTINUITY else 20,continuous=True)
     root=base/'control'
     with r.owned_control(root,cfg.data_dir):pass
     identity=dict(control=str(root),plan=sha(plan.value()),code=r.code_identity())
@@ -154,7 +156,24 @@ def controller(base,interrupt=None):
         t0,debts,frozen,old_events,old_issue=(b[k] for k in ('t0','debts','frozen','old_events','old_issue'))
     else:plan,root,t0,debts,frozen,old_events,old_issue=fixture(base)
     wall=[load(base/'clock.json')['at_ms'] if (base/'clock.json').exists() else t0]
-    stop=threading.Event();launches=[];notices=[];children=[]
+    stop=threading.Event();launches=[];notices=[];children=[];weather_proof={};weather_owner_pids=[]
+    def weather_observe(cfg,**kwargs):
+        fixture=load(base/'fixture.json');market=fixture['market']
+        def forecast(issue):
+            body=b''.join(native(station,49,issue) for _,station,_ in US_CITIES.values())
+            class Response(io.BytesIO):
+                status=200;headers={'Content-Length':str(len(body))}
+                def geturl(self):
+                    from holy_weather.lamp import nomads_source
+                    return nomads_source(issue)
+            return us_lamp.fetch_cycle(issue,fetch=lambda *a,**k:Response(body),clock=lambda:wall[0])
+        def metar(station):
+            zone=next(v[2] for v in US_CITIES.values() if v[1]==station)
+            return observations(dict(station=station,timezone=zone),wall[0])
+        kwargs.update(discover=lambda city:([market],fixture['receipt'],[]) if city=='new-york' else ([],{},[]),
+                      lamp_fetch=forecast,metar_fetch=metar,monotonic=lambda:(wall[0]-t0)/1000,
+                      connect=lambda *a,**k:(_ for _ in ()).throw(AssertionError('WEATHER_OPENED_PRICE_SOCKET')))
+        return catalogue.observe_catalogue(cfg,**kwargs)
     with tempfile.TemporaryDirectory(prefix='hw-quota-',dir='/tmp') as temp:
         path=str(Path(temp)/'notify')
         with socket.socket(socket.AF_UNIX,socket.SOCK_DGRAM) as listener:
@@ -167,15 +186,26 @@ def controller(base,interrupt=None):
             def wait(seconds):
                 drain()
                 state=load(root/'state.json')
+                if WEATHER_CONTINUITY and state.get('weather_collecting') and not weather_owner_pids:
+                    weather_owner_pids.extend(writer(Path(plan.config.data_dir),plan.config))
                 if ((interrupt=='quota' and state['status']=='WAITING_NETWORK_QUOTA')
                         or (interrupt=='paid_backoff' and state['status']=='BACKOFF' and state.get('recovery_charged'))):
                     assert not launches
                     (base/'clock.json').write_text(canonical(dict(at_ms=wall[0])))
                     os._exit(91)  # Test crash: release actual OS locks; no child exists yet.
                 if launches:time.sleep(min(seconds,.02))
-                else:wall[0]+=round(seconds*1000)
+                else:
+                    if WEATHER_CONTINUITY:time.sleep(.0001)
+                    wall[0]+=round(seconds*1000)
             def spawn(root,nonce,token,fd):
                 assert wall[0]>=t0+420000 and not launches
+                if WEATHER_CONTINUITY:
+                    # Read committed WAL immediately before any new PRICE process.
+                    with ro(Path(plan.config.data_dir)) as c:
+                        weather_proof.update(
+                            noaa_stations=c.execute("select count(*) from meta where key like 'lamp_context_v1:%' and json_extract(value,'$.status')='OK'").fetchone()[0],
+                            metar_stations=c.execute("select count(*) from meta where key like 'catalogue_metar_station_v1:%' and json_extract(value,'$.status')='OK'").fetchone()[0],
+                            collection_before_price_ms=wall[0],controller_writer_pids=weather_owner_pids)
                 with (base/'launch-once.json').open('x') as f:f.write(canonical(dict(at_ms=wall[0])))
                 launches.append(wall[0]);(base/'clock.json').write_text(canonical(dict(at_ms=wall[0])))
                 child=subprocess.Popen([sys.executable,'-B',str(Path(__file__)),'worker',str(root),nonce,str(fd)],
@@ -193,7 +223,8 @@ def controller(base,interrupt=None):
                         return rc
                     def terminate(self):child.terminate()
                 return Child()
-            result=r.supervise(plan,root,token=DUMMY_TOKEN,clock=lambda:wall[0],monotonic=REAL_MONOTONIC,wait=wait,stop=stop,_spawn=spawn,on_health=health)
+            result=r.supervise(plan,root,token=DUMMY_TOKEN,clock=lambda:wall[0],monotonic=REAL_MONOTONIC,wait=wait,stop=stop,_spawn=spawn,on_health=health,
+                               **({'_weather_observe':weather_observe} if WEATHER_CONTINUITY else {}))
             if not launches:
                 # The old latch remains closed even after quota AND backoff elapsed.
                 wall[0]=t0+421000
@@ -220,6 +251,9 @@ def controller(base,interrupt=None):
             forecast_before_ms=old_issue,forecast_after_ms=forecast['issue_ms'],
             watchdog_notifications=len(notices),waiting_visible=any('collection=PAUSED' in n for n in notices),
             terminal=result['status'],child=load(base/'child-proof.json') if launches else None,integrity='ok',schema=s.c.execute('pragma user_version').fetchone()[0])
+        if WEATHER_CONTINUITY:
+            proof['weather_during_wait']=weather_proof
+            proof['weather_wait_visible']=any('weather=COLLECTING' in n for n in notices)
         if launches:
             assert proof['child']['http_sends']==0
             assert result['restarts']==debts+[t0+120000]

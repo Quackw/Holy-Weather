@@ -3,6 +3,7 @@ from datetime import datetime,timedelta,timezone
 import json
 from zoneinfo import ZoneInfo
 from .core import sha
+from .core import US_CITIES
 
 CATALOGUE='price_catalogue_v1:'
 DELIVERY='alert_delivery_v1:'
@@ -60,6 +61,20 @@ def selection(c,at_ms,days):
     latest=set(tokens)|{'__PRICE_ALERT__'+t for t in tokens}|{'__MARKET__'+c for c in conditions}
     latest|={'__LAMP_ALERT__:lamp_alert_v1:'+c for c in conditions}
     latest|={prefix+':lamp_context_v1:'+day for day in station_days for prefix in ('__LAMP__','__LAMP_POLL__')}
+    # Independent NOAA collection may have no Polymarket contract that day.
+    # Retire only old unowned projections into this same verified full archive;
+    # unresolved/UNKNOWN markets still pin their station/day and input evidence.
+    retained={m['station']+':'+m['date'] for k,raw in values.items()
+              if k.startswith(CATALOGUE) and k not in retired for m in [json.loads(raw)]}
+    zones={station:ZoneInfo(zone) for _,station,zone in US_CITIES.values()}
+    for key in values:
+        if not key.startswith('lamp_context_v1:'):continue
+        suffix=key.removeprefix('lamp_context_v1:');station,_,day=suffix.partition(':')
+        if station not in zones or suffix in retained:continue
+        today=datetime.fromtimestamp(at_ms/1000,zones[station]).date()
+        if day<(today-timedelta(days=days)).isoformat():
+            meta.add(key)
+            latest|={prefix+':lamp_context_v1:'+suffix for prefix in ('__LAMP__','__LAMP_POLL__')}
     return {'meta':meta,'tokens':tokens,'latest':latest}
 
 

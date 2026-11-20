@@ -78,6 +78,8 @@ class Plan:
         value=dict(config=asdict(self.config),session_day=self.session_day,deadline_ms=self.deadline_ms,phase_seconds=self.phase_seconds,archive_dir=self.archive_dir)
         if not self.config.catalogue_metar_enabled:value['config'].pop('catalogue_metar_enabled',None)
         if not self.config.us_lamp_enabled:value['config'].pop('us_lamp_enabled',None)
+        if not getattr(self.config,'us_weather_continuity_enabled',False):value['config'].pop('us_weather_continuity_enabled',None)
+        if getattr(self.config,'us_lamp_notice_mode','pre_peak')=='pre_peak':value['config'].pop('us_lamp_notice_mode',None)
         if self.continuous:value['continuous']=True  # Preserve every old finite plan/hash.
         if self.history_storage is not None:value['history_storage']=self.history_storage.value()
         return value
@@ -188,7 +190,7 @@ def preflight(plan):
         finally:c.close()
 
 
-def prepare_resume(store,identity,at,*,carry_pending_price=False):
+def prepare_resume(store,identity,at,*,carry_pending_price=False,carry_pending_lamp=False):
     """Keep eligible unclaimed PRICE/LAMP work across a clean window handoff."""
     disabled=False
     with store.transaction():
@@ -203,7 +205,8 @@ def prepare_resume(store,identity,at,*,carry_pending_price=False):
                 if v.get('track') not in ('PRICE_ALERT','LAMP_ALERT'):raise RecoveryStop('RECOVERY_UNEXPECTED_PENDING_TRACK')
                 pending.append((key,v))
         for key,v in pending:
-            if (carry_pending_price and not disabled and v['status']=='PENDING'
+            eligible_track=carry_pending_price or carry_pending_lamp and v['track']=='LAMP_ALERT'
+            if (eligible_track and not disabled and v['status']=='PENDING' and v.get('claimed_ms') is None
                     and v.get('confirmation') is None and v.get('delivery_notes') is None
                     and v['event_ms']<=at<=v['expires_ms']):
                 event=store.c.execute('select token from events where id=? and type=?',(v['event_id'],v['track'])).fetchone()
@@ -317,7 +320,8 @@ def worker(root,nonce,token,guard_fd=None):
                 cfg=replace(plan.config,duration_seconds=min(plan.phase_seconds,int(remaining)))
                 with CatalogueStore(cfg,session=False) as store:
                     disabled=prepare_resume(store,saved['identity'],time.time_ns()//1000000,
-                        carry_pending_price=carry_pending_price)
+                        carry_pending_price=carry_pending_price,
+                        carry_pending_lamp=getattr(cfg,'us_weather_continuity_enabled',False))
                 cfg=replace(cfg,telegram_enabled=cfg.telegram_enabled and not disabled)
                 def sender_status(value):
                     delivery.update(value)
@@ -346,7 +350,8 @@ def spawn(root,nonce,token,guard_fd=None):
     return child
 
 
-def supervise(plan,control_dir,*,token=None,stop=None,clock=None,monotonic=time.monotonic,wait=None,_spawn=spawn,on_health=None):
+def supervise(plan,control_dir,*,token=None,stop=None,clock=None,monotonic=time.monotonic,wait=None,_spawn=spawn,on_health=None,
+              _weather_observe=observe_catalogue):
     """Graceful stop only. Continuous recovery additionally proves Linux ownership."""
     if plan.config.telegram_enabled and (not isinstance(token,str) or not re.fullmatch(r'\d+:[A-Za-z0-9_-]{20,}',token)):raise RecoveryStop('RECOVERY_EXPLICIT_TOKEN')
     default_wait=wait is None
@@ -379,6 +384,7 @@ def supervise(plan,control_dir,*,token=None,stop=None,clock=None,monotonic=time.
         if plan.continuous:
             state['controller_process']=lifecycle.own_identity()
             state=lifecycle.compact_control(root,plan,state,write,clock())
+        if getattr(plan.config,'us_weather_continuity_enabled',False):state['weather_collecting']=False
         write(root,'plan.json',saved_plan)
         mono_deadline=float('inf') if plan.deadline_ms is None else monotonic()+max(0,(plan.deadline_ms-clock())/1000)
         retry=bool(state.get('retry'));child=None
@@ -387,8 +393,12 @@ def supervise(plan,control_dir,*,token=None,stop=None,clock=None,monotonic=time.
             if on_health:
                 value={k:state[k] for k in ('status','telegram_enabled','telegram_disabled_reason') if k in state}
                 waiting=state.get('network_quota_wait')
-                if waiting and state['status'] in (lifecycle.QUOTA_WAIT,'BACKOFF'):
-                    value.update(collection_paused=True,recovery_reason=waiting['reason'],
+                if state['status'] in (lifecycle.QUOTA_WAIT,'BACKOFF') and (waiting or state.get('weather_collecting')):
+                    last=state['attempts'][-1]
+                    waiting=waiting or dict(reason=last['state'],quota_available_ms=clock(),
+                                           resume_not_before_ms=state.get('next_ms'))
+                    value.update(collection_paused=not state.get('weather_collecting',False),price_paused=True,
+                        weather_collecting=state.get('weather_collecting',False),recovery_reason=waiting['reason'],
                         quota_available_ms=waiting['quota_available_ms'],
                         next_attempt_ms=state.get('next_ms',waiting['resume_not_before_ms']))
                 on_health(value)
@@ -401,6 +411,50 @@ def supervise(plan,control_dir,*,token=None,stop=None,clock=None,monotonic=time.
             if type(enabled) is not bool or reason not in (None,'NOT_ENABLED_IN_PLAN','NOT_ENABLED_IN_CONFIG','PREVIOUS_SEND_UNCONFIRMED','SEND_RESULT_UNKNOWN','SEND_RESULT_NOT_SENT','SEND_RESULT_UNKNOWN_AT_CLOSE'):raise RecoveryStop('RECOVERY_SENDER_STATUS')
             if state.get('telegram_enabled')!=enabled or state.get('telegram_disabled_reason')!=reason:
                 state.update(telegram_enabled=enabled,telegram_disabled_reason=reason);save(state['status'])
+        def wait_recovery(until):
+            """Own weather SQLite only while the proven previous child is closed.
+
+            HTTP helpers never write. Closing this context releases the writer
+            before quota admission/preflight/spawn; no extra child or recovery.
+            """
+            enabled=getattr(plan.config,'us_weather_continuity_enabled',False) and lifecycle.network_retry(state,clock())
+            if not enabled:
+                while clock()<until and not ended():
+                    if clock()<state['last_ms']:raise RecoveryStop('RECOVERY_CLOCK_REVERSED')
+                    health();wait(min(1,(until-clock())/1000))
+                return
+            class WeatherProgress:
+                def __init__(self):self.root=root
+                def __call__(self,stage):
+                    if clock()<state['last_ms']:raise RecoveryStop('RECOVERY_CLOCK_REVERSED')
+                    health()
+                def observation(self,value):
+                    state['observation']=dict(value,writer_role='CONTROLLER_WEATHER',price_paused=True)
+                    save(state['status'])
+                def storage_status(self,value):state['storage']=value;save(state['status'])
+            class WeatherStop:
+                def is_set(self):return ended() or clock()>=until
+            progress=WeatherProgress()
+            while clock()<until and not ended():
+                if code_identity()!=code:raise RecoveryStop('RECOVERY_CODE_DRIFT')
+                if preflight(plan)!=identity:raise RecoveryStop('RECOVERY_CONTROL_BINDING')
+                checkpoint(plan,progress)
+                with CatalogueStore(plan.config,session=False) as store:
+                    disabled=prepare_resume(store,identity,clock(),carry_pending_lamp=True)
+                cfg=replace(plan.config,duration_seconds=min(plan.phase_seconds,max(1,math.ceil((until-clock())/1000))),
+                            telegram_enabled=plan.config.telegram_enabled and not disabled)
+                state['weather_collecting']=True;save(state['status'])
+                try:
+                    def weather_sender(value):
+                        if disabled:value=dict(telegram_enabled=False,telegram_disabled_reason='PREVIOUS_SEND_UNCONFIRMED')
+                        sender_status(value)
+                    result=_weather_observe(cfg,weather_only=True,token=token if cfg.telegram_enabled else None,
+                        clock=clock,monotonic=monotonic,wait=wait,stop=WeatherStop(),progress=progress,
+                        on_sender_status=weather_sender,**({'rotate_bytes':160*1024**2} if plan.history_storage else {}))
+                    if result['state'] not in ('COMPLETED_WINDOW','SIGNAL_STOP'):
+                        raise RecoveryStop('RECOVERY_WEATHER_OUTCOME')
+                finally:
+                    state['weather_collecting']=False;save(state['status'])
         try:
             while not ended():
                 health()
@@ -418,18 +472,13 @@ def supervise(plan,control_dir,*,token=None,stop=None,clock=None,monotonic=time.
                             due=lifecycle.quota_available(state['restarts'],now)
                             if due>now:
                                 lifecycle.defer_network(state,now);save(lifecycle.QUOTA_WAIT)
-                                while clock()<due and not ended():
-                                    if clock()<state['last_ms']:raise RecoveryStop('RECOVERY_CLOCK_REVERSED')
-                                    health();wait(min(1,(due-clock())/1000))
+                                wait_recovery(due)
                                 continue  # Recheck both windows before the one durable charge.
                         if not state.get('recovery_charged') and not lifecycle.charge(state,now):save(state['status']);break
                     elif len(recent)>=6 or sum(now-t<3600000 for t in recent)>=3:state['retry']=False;save('RESTART_BUDGET_EXHAUSTED');break
                     next_ms=state.get('next_ms',now+min(BACKOFF_SECONDS*2**len(recent),300)*1000)
                     state.update(retry=True,next_ms=next_ms);save('BACKOFF')
-                    while clock()<next_ms and not ended():
-                        if clock()<state['last_ms']:raise RecoveryStop('RECOVERY_CLOCK_REVERSED')
-                        health()
-                        wait(min(1,(next_ms-clock())/1000))
+                    wait_recovery(next_ms)
                     if ended():break
                 if code_identity()!=code:raise RecoveryStop('RECOVERY_CODE_DRIFT')
                 binding=preflight(plan)

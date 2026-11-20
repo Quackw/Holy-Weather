@@ -43,6 +43,29 @@ def render(event, market, verified_markets):
         def degrees(key):
             return format(Decimal(view[key]).quantize(Decimal('0.1')).normalize(), 'f')
         label = bucket_label(market['bucket'])
+        if event.get('notification_policy')=='US_WARMING_HOURLY_V2':
+            title='Изменение температуры · ежечасная проверка.'
+            if event['reason']=='WARMING_START':
+                start=datetime.fromtimestamp(view['warming_start_ms']/1000,zone)
+                title=f'Прогнозный прогрев с {start:%H:%M %Z}.'
+            revisions=[]
+            previous=event.get('previous_review') or {}
+            current={h['valid_ms']:h['temperature_f'] for h in event['current_forecast']['hours']}
+            for hour in event.get('changed_forecast_hours',[])[:3]:
+                when=datetime.fromtimestamp(hour/1000,zone)
+                revisions.append(f'Прогноз на {when:%H:%M %Z}: {previous["hours"][str(hour)]} → {current[hour]}°F.')
+            if len(event.get('changed_forecast_hours',[]))>3:revisions.append('Изменились и другие часы прогноза.')
+            if event.get('metar_changes'):
+                values=[Decimal(previous['current_f'])]+[Decimal(r['temperature_f']) for r in event['metar_changes']]
+                revisions.append(f'Изменения METAR за час: {min(values):f}–{max(values):f}°F.')
+            change=Decimal(view['warming_f'])
+            future=(f'Ожидается ещё +{degrees("warming_f")}°F, до {degrees("future_peak_f")}°F к {local:%H:%M %Z}.'
+                    if change>0 else f'Дополнительного прогрева не ожидается. Прогноз оставшихся часов — до {degrees("future_peak_f")}°F.')
+            return [f'☀️ <b>LAMP · {CITY_NAMES[station]}</b>',
+                    f'{day.day} {MONTHS[day.month-1]} · {station} · METAR / NOAA LAMP','',title,
+                    *revisions,f'Сейчас {degrees("current_f")}°F · METAR {observed:%H:%M %Z}.',future,
+                    f'Максимум по наблюдениям {degrees("observed_max_f")}°F.',
+                    f'<a href="{escape(market["url"], quote=True)}">Ожидаемый диапазон дня {label} ↗</a>']
         return [f'☀️ <b>LAMP · {CITY_NAMES[station]}</b>',
                 f'{day.day} {MONTHS[day.month-1]} · {station} · METAR / NOAA LAMP', '',
                 f'По METAR в {observed:%H:%M} — {degrees("current_f")}°F. К {local:%H:%M %Z} ожидается {degrees("future_peak_f")}°F '

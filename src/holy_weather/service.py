@@ -46,10 +46,12 @@ class Health:
             'OFF' if reason in ('NOT_ENABLED_IN_PLAN','NOT_ENABLED_IN_CONFIG') else 'DISABLED')
         status=dict(controller=safe(value.get('status')),telegram=sender,
                     reason=safe(reason) if reason is not None else None,watchdog='ARMED' if self.armed else 'OFF')
-        if value.get('collection_paused') is True:
+        if value.get('collection_paused') is True or value.get('price_paused') is True:
             at=value.get('next_attempt_ms');quota=value.get('quota_available_ms')
             valid=lambda t:type(t) is int and 0<=t<253402300800000
-            status.update(collection_paused=True,recovery_reason=safe(value.get('recovery_reason')),
+            status.update(collection_paused=value.get('collection_paused',True),
+                          price_paused=True,weather_collecting=value.get('weather_collecting',False),
+                          recovery_reason=safe(value.get('recovery_reason')),
                           next_attempt_ms=at if valid(at) else None,
                           quota_available_ms=quota if valid(quota) else None)
         changed=status!=self.previous
@@ -62,9 +64,10 @@ class Health:
         self.next_ping=now+self.interval
         message='WATCHDOG=1\nSTATUS=PRICE controller='+status['controller']+'; Telegram='+sender
         if status['reason']:message+='; reason='+status['reason']
-        if status.get('collection_paused'):
+        if status.get('price_paused'):
             at=status['next_attempt_ms']
-            message+='; collection=PAUSED; retry_at='+(
+            message+=('; PRICE=PAUSED; weather=COLLECTING' if status.get('weather_collecting') else '; collection=PAUSED')
+            message+='; retry_at='+(
                 datetime.fromtimestamp(at/1000,timezone.utc).isoformat(timespec='seconds') if at is not None else 'UNKNOWN')
             message+='; recovery_reason='+status['recovery_reason']
         try:self.notify(message)
