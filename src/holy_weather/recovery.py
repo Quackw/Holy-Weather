@@ -190,23 +190,49 @@ def preflight(plan):
         finally:c.close()
 
 
+def _terminal_transport_unknown(value, at):
+    """A completed failed request can stay uncertain without retrying its event."""
+    return (value.get('status') == 'UNKNOWN'
+            and value.get('track') in ('PRICE_ALERT', 'LAMP_ALERT')
+            and value.get('reason') in ('URLError', 'HTTP_502')
+            and type(value.get('claimed_ms')) is int
+            and type(value.get('completed_ms')) is int
+            and 0 < value['claimed_ms'] <= value['completed_ms'] <= at
+            and value.get('message_id') is None
+            and isinstance(value.get('event_id'), str)
+            and re.fullmatch('[a-f0-9]{64}', value['event_id']) is not None
+            and isinstance(value.get('preview_sha256'), str)
+            and re.fullmatch('[a-f0-9]{64}', value['preview_sha256']) is not None)
+
+
 def prepare_resume(store,identity,at,*,carry_pending_price=False,carry_pending_lamp=False):
-    """Keep eligible unclaimed PRICE/LAMP work across a clean window handoff."""
+    """Retain uncertain receipts and recover future work at a worker boundary."""
     disabled=False
     with store.transaction():
         previous=store.c.execute("select value from meta where key='price_recovery_control_v1'").fetchone()
         if previous and json.loads(previous[0])!=identity:raise RecoveryStop('RECOVERY_CONTROL_BINDING')
         store.c.execute("insert or ignore into meta values('price_recovery_control_v1',?)",(canonical(identity),))
-        pending=[]
+        pending=[];quarantine=[]
         for key,raw in store.c.execute("select key,value from meta where key like 'alert_delivery_v1:%'"):
             v=json.loads(raw)
-            if v['status']=='UNKNOWN' or v.get('claimed_ms') is not None and v['status']!='SENT':disabled=True
+            if _terminal_transport_unknown(v,at):
+                marker_key='transport_unknown_quarantine_v1:'+v['event_id']
+                expected=dict(decision='KEEP_UNKNOWN_NO_RETRY',key=key,event_id=v['event_id'],receipt_sha256=sha(raw.encode()))
+                row=store.c.execute('select value from meta where key=?',(marker_key,)).fetchone()
+                if row is None:quarantine.append((marker_key,dict(expected,at_ms=at)))
+                else:
+                    try:marker=json.loads(row[0])
+                    except (ValueError,TypeError):marker=None
+                    if (not isinstance(marker,dict) or set(marker)!=set(expected)|{'at_ms'}
+                            or any(marker[k]!=value for k,value in expected.items())
+                            or type(marker['at_ms']) is not int or not 0<marker['at_ms']<=at):disabled=True
+            elif v['status']=='UNKNOWN' or v.get('claimed_ms') is not None and v['status']!='SENT':disabled=True
             if v['status'] in ('PENDING','WAITING_BID'):
                 if v.get('track') not in ('PRICE_ALERT','LAMP_ALERT'):raise RecoveryStop('RECOVERY_UNEXPECTED_PENDING_TRACK')
                 pending.append((key,v))
         for key,v in pending:
             eligible_track=carry_pending_price or carry_pending_lamp and v['track']=='LAMP_ALERT'
-            if (eligible_track and not disabled and v['status']=='PENDING' and v.get('claimed_ms') is None
+            if (eligible_track and not disabled and not quarantine and v['status']=='PENDING' and v.get('claimed_ms') is None
                     and v.get('confirmation') is None and v.get('delivery_notes') is None
                     and v['event_ms']<=at<=v['expires_ms']):
                 event=store.c.execute('select token from events where id=? and type=?',(v['event_id'],v['track'])).fetchone()
@@ -218,7 +244,10 @@ def prepare_resume(store,identity,at,*,carry_pending_price=False,carry_pending_l
                         continue
             v.update(status='EXPIRED',reason='NO_BACKLOG_ON_RECOVERY',completed_ms=at)
             store.c.execute('update meta set value=? where key=?',(canonical(v),key))
+        if not disabled:
+            for key,value in quarantine:store.c.execute('insert into meta values(?,?)',(key,canonical(value)))
     return disabled
+
 
 
 class Progress:
